@@ -1,0 +1,25 @@
+# 파이썬
+__pycache__/
+*.pyc
+venv/
+.env
+
+# 녹음·로그 (음성 데이터 — 커밋 금지!)
+rec_*.wav
+log_*.csv
+*.m4a
+
+# 모델 캐시 (수 GB — 각자 로컬에서 다운로드)
+models/
+*.bin
+*.safetensors
+*.gguf
+*.ggml
+
+# 실험 데이터 (용량 큼 — 공유는 결과 CSV/그래프만)
+data/
+!data/refs.csv
+
+# OS
+.DS_Store
+Thumbs.db

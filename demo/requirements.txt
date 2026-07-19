@@ -1,0 +1,19 @@
+# ── 필수 (STT + 웹 UI) ──
+faster-whisper>=1.0
+sounddevice
+soundfile
+numpy
+fastapi
+uvicorn
+websockets
+
+# ── 번역 (--translate 옵션) ──
+transformers
+sentencepiece
+torch
+sacremoses
+
+# ── 선택 기능 ──
+noisereduce        # --denoise (노이즈 제거 전후 비교)
+jiwer              # scripts/evaluate_stt.py 의 CER/WER 계산
+scipy              # scripts/make_noisy_testset.py 의 필터·리샘플링
