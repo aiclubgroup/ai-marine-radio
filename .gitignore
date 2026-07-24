@@ -1,0 +1,10 @@
+__pycache__/
+venv/
+.DS_Store
+*.wav
+log_*.csv
+log_*.txt
+logs/
+models/
+engine.log
+engine/models/

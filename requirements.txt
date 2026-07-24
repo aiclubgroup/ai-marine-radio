@@ -1,3 +1,12 @@
-﻿PySide6
+# ── UI (PySide6 프로토타입 / 연동판) ──
+PySide6
 numpy
 sounddevice
+
+# ── STT 엔진 (engine/ 폴더) ──
+# 엔진까지 돌리려면: pip install -r engine/requirements.txt
+# (faster-whisper, fastapi, uvicorn, websockets, soundfile 등)
+
+# ── 참고용 단독 STT (main.py) ──
+faster-whisper
+scipy

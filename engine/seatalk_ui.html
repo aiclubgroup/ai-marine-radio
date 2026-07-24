@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SeaTalk AI — Smart VHF System</title>
+<style>
+  /* ── SeaTalk AI 디자인 시스템 (피그마 기반) ── */
+  :root{
+    --bg:#060809; --panel:#0b0f14; --card:#11161d; --card2:#161d26;
+    --line:#1f2937; --ink:#e6edf3; --mut:#8b98a5; --dim:#5b6672;
+    --cyan:#4fc3e8; --ptt:#53b8d6; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;}
+  html,body{height:100%;background:var(--bg);color:var(--ink);-webkit-user-select:none;user-select:none;}
+  .frame{max-width:1180px;height:100vh;max-height:760px;margin:0 auto;display:flex;flex-direction:column;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+    position:relative;top:50%;transform:translateY(-50%);}
+
+  /* 상단 바 */
+  .topbar{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--card);}
+  .ch{display:flex;align-items:baseline;gap:5px;}
+  .ch .lbl{font-size:12px;color:var(--mut);letter-spacing:1px;}
+  .ch .num{font-size:30px;font-weight:800;color:var(--cyan);line-height:1;}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:18px;margin-left:4px;}
+  .bars i{width:5px;background:var(--ok);border-radius:1px;display:block;}
+  .bars i:nth-child(1){height:5px}.bars i:nth-child(2){height:8px}.bars i:nth-child(3){height:11px}
+  .bars i:nth-child(4){height:14px}.bars i:nth-child(5){height:17px;opacity:.35}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:14px;}
+  .badge{display:flex;align-items:center;gap:7px;padding:6px 13px;border:1px solid #24435259;border-radius:999px;
+    background:#0d2530aa;color:var(--cyan);font-size:12.5px;font-weight:600;}
+  .badge.off{color:var(--dim);border-color:var(--line);background:transparent;}
+  .clock{font-family:'Courier New',monospace;font-size:19px;font-weight:700;letter-spacing:1px;}
+  .spk{display:flex;gap:5px;}
+  .spk button{width:30px;height:26px;border-radius:6px;border:1px solid var(--line);background:var(--card2);
+    color:var(--mut);font-size:12px;font-weight:700;cursor:pointer;}
+  .spk button.on{background:#134152;color:var(--cyan);border-color:#2a6b84;}
+
+  /* 경고 스트립 */
+  .strip{padding:7px 18px;font-size:12.5px;color:var(--mut);border-bottom:1px solid var(--line);
+    background:var(--panel);display:flex;align-items:center;gap:8px;transition:all .25s;}
+  .strip.alert{background:#3a0d0d;color:#ffb4b4;font-weight:700;font-size:14px;}
+  .strip .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);}
+  .strip.alert .dot{background:var(--danger);animation:blink 1s infinite;}
+  @keyframes blink{50%{opacity:.2}}
+
+  /* 뷰 영역 */
+  .view{flex:1;overflow-y:auto;padding:16px 18px;display:none;}
+  .view.on{display:block;}
+
+  /* 메인: 자막 */
+  #subs .empty{color:var(--dim);font-size:15px;padding:8px 2px;}
+  .utt{margin-bottom:16px;animation:up .18s ease-out;}
+  @keyframes up{from{transform:translateY(6px);opacity:0}}
+  .utt .meta{font-size:11.5px;color:var(--dim);margin-bottom:3px;}
+  .utt .meta b{color:var(--cyan);font-weight:700;}
+  .utt .txt{font-size:19px;line-height:1.45;}
+  .utt .tr{font-size:14.5px;color:#8fd8a8;margin-top:3px;line-height:1.4;}
+  .utt .dg{font-size:13px;color:var(--danger);font-weight:700;margin-top:3px;}
+  .utt.danger .txt{color:#ffd7d7;}
+
+  /* 로그 뷰 */
+  .logs h2{font-size:20px;margin-bottom:12px;}
+  .logs h2 span{color:var(--mut);font-weight:400;font-size:14px;}
+  .logtable{width:100%;border-collapse:collapse;font-size:13.5px;}
+  .logtable th{color:var(--mut);font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:12px;}
+  .logtable td{padding:8px 10px;border-bottom:1px solid #151c24;vertical-align:top;}
+  .logtable td.t{color:var(--dim);white-space:nowrap;font-family:monospace;}
+  .logtable td.s{color:var(--cyan);font-weight:700;white-space:nowrap;}
+  .logtable td .tr2{color:#8fd8a8;font-size:12.5px;margin-top:2px;}
+  .logtable tr.dgr td{background:#2a0e0e66;}
+  .logs .empty{color:var(--dim);padding:14px 4px;font-size:14px;}
+
+  /* 플레이스홀더 뷰 */
+  .ph{color:var(--mut);font-size:14px;line-height:2;}
+  .ph h2{font-size:20px;color:var(--ink);margin-bottom:10px;}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px;}
+  .card{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:10px;padding:14px;}
+  .card .k{font-size:12px;color:var(--mut);}
+  .card .v{font-size:26px;font-weight:800;margin:2px 0;}
+  .card .d{font-size:11.5px;color:var(--dim);}
+
+  /* 하단 바 */
+  .dock{display:flex;align-items:center;gap:10px;padding:12px 18px;border-top:1px solid var(--line);background:var(--card);}
+  .db{width:66px;height:58px;border-radius:10px;border:1px solid var(--line);background:var(--card2);color:var(--mut);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:10.5px;font-weight:700;cursor:pointer;}
+  .db svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
+  .db.on{color:var(--cyan);border-color:#2a6b84;background:#10222c;}
+  #ptt{flex:1;max-width:300px;margin:0 auto;height:58px;border:none;border-radius:12px;background:var(--ptt);
+    color:#04222c;font-size:21px;font-weight:800;letter-spacing:2px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:10px;
+    box-shadow:0 0 22px #53b8d64d;transition:all .12s;}
+  #ptt.rec{background:#e05252;color:#fff;box-shadow:0 0 26px #e0525266;}
+  #ptt:disabled{background:#233039;color:var(--dim);box-shadow:none;cursor:wait;}
+  #ptt svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;}
+  .dock .right{margin-left:auto;}
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="topbar">
+    <div class="ch"><span class="lbl">CH</span><span class="num">16</span></div>
+    <div class="bars"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="top-right">
+      <div class="spk" title="화자 (PTT 누르기 전 선택)">
+        <button class="on" data-s="A">A</button><button data-s="B">B</button><button data-s="C">C</button>
+      </div>
+      <div class="badge" id="nf">⚙ AI Noise Filter <span id="nfState">OFF</span></div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </div>
+
+  <div class="strip" id="strip"><span class="dot"></span><span id="stripTxt">시스템 초기화 중…</span></div>
+
+  <div class="view on" id="v-main"><div id="subs"><div class="empty">교신 대기중입니다.</div></div></div>
+
+  <div class="view logs" id="v-log">
+    <h2>교신 로그 (Logs) <span id="logCount">총 0건</span></h2>
+    <table class="logtable"><thead><tr><th>시간</th><th>화자</th><th>내용 (번역)</th></tr></thead>
+      <tbody id="logBody"></tbody></table>
+    <div class="empty" id="logEmpty">기록이 없습니다.</div>
+  </div>
+
+  <div class="view ph" id="v-sys">
+    <h2>시스템 상태 (System)</h2>
+    <div class="cards">
+      <div class="card"><div class="k">엔진</div><div class="v" id="sysEngine">로딩중</div><div class="d" id="sysModel">-</div></div>
+      <div class="card"><div class="k">이번 세션 발화</div><div class="v" id="sysUtt">0</div><div class="d">교신 로그 저장 중</div></div>
+      <div class="card"><div class="k">평균 처리 시간</div><div class="v" id="sysRtf">-</div><div class="d">발화당 인식 소요(초)</div></div>
+    </div>
+    <p style="margin-top:14px">배터리·저장공간·온도 카드는 젯슨 연동 시 tegrastats로 채워질 예정.</p>
+  </div>
+
+  <div class="view ph" id="v-menu">
+    <h2>설정 (Settings)</h2>
+    <p>VHF 채널 선택 · 송신 출력 · 자막 글자 크기 · 볼륨 — 하드웨어(VHF 보드) 연동 후 활성화됩니다.<br>
+    현재 데모에서 동작하는 설정: 화자 선택(상단 A/B/C), 노이즈 필터 표시, 교신 로그 저장(자동).</p>
+  </div>
+
+  <div class="dock">
+    <div class="db" data-v="menu"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12"/></svg>MENU</div>
+    <div class="db" data-v="sys"><svg viewBox="0 0 24 24"><polyline points="2 12 6 12 9 5 14 19 17 12 22 12"/></svg>SYS</div>
+    <div class="db" id="clr"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>CLR</div>
+    <div class="db" data-v="log"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>LOG</div>
+    <button id="ptt" disabled><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span id="pttTxt">로딩중…</span></button>
+    <div class="db right" data-v="main"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>MODE</div>
+  </div>
+</div>
+
+<script>
+/* ── 시계 ── */
+setInterval(()=>{const d=new Date();
+  document.getElementById('clock').textContent=[d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,'0')).join(':');
+},500);
+
+/* ── 뷰 전환 ── */
+const views={main:'v-main',log:'v-log',sys:'v-sys',menu:'v-menu'};
+document.querySelectorAll('.db[data-v]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
+  document.getElementById(views[b.dataset.v]).classList.add('on');
+  document.querySelectorAll('.db[data-v]').forEach(x=>x.classList.remove('on'));
+  if(b.dataset.v!=='main') b.classList.add('on');
+});
+
+/* ── 화자 선택 ── */
+let speaker='A';
+document.querySelectorAll('.spk button').forEach(b=>b.onclick=()=>{
+  speaker=b.dataset.s;
+  document.querySelectorAll('.spk button').forEach(x=>x.classList.toggle('on',x===b));
+  send({type:'speaker',value:speaker});
+});
+
+/* ── WebSocket ── */
+let ws=null, ready=false, uttCount=0, procTimes=[];
+function connect(){
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen=()=>setStrip('서버 연결됨 — 엔진 로딩 중…',false);
+  ws.onclose=()=>{setStrip('서버 연결 끊김 — 재연결 중…',false);setReady(false);setTimeout(connect,1500);};
+  ws.onmessage=(e)=>handle(JSON.parse(e.data));
+}
+function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
+
+function setReady(r,label){ ready=r; const p=document.getElementById('ptt');
+  p.disabled=!r; document.getElementById('pttTxt').textContent=r?'PTT':(label||'로딩중…'); }
+function setStrip(t,alert){ const s=document.getElementById('strip');
+  s.classList.toggle('alert',!!alert); document.getElementById('stripTxt').textContent=t; }
+
+function handle(m){
+  if(m.type==='status'){
+    if(m.state==='ready'){ setReady(true); setStrip('AI 위험감지 정상 작동 중',false);
+      document.getElementById('sysEngine').textContent='준비됨';
+      document.getElementById('sysModel').textContent=m.model||'-';
+      document.getElementById('nfState').textContent=m.denoise?'ON':'OFF';
+      document.getElementById('nf').classList.toggle('off',!m.denoise);
+    } else if(m.state==='processing'){ setReady(false,'인식중…'); }
+    else if(m.state==='loading'){ setReady(false); setStrip(m.detail||'엔진 로딩 중…',false); }
+  }
+  if(m.type==='utterance'){
+    setReady(true); uttCount++;
+    document.getElementById('sysUtt').textContent=uttCount;
+    if(m.proc_sec){ procTimes.push(m.proc_sec);
+      document.getElementById('sysRtf').textContent=(procTimes.reduce((a,b)=>a+b,0)/procTimes.length).toFixed(1)+'s'; }
+    addUtt(m); addLog(m);
+    if(m.danger&&m.danger.length){ setStrip('⚠ 위험 상황 감지: '+m.danger.join(', ')+' — 경고 알림',true);
+      setTimeout(()=>setStrip('AI 위험감지 정상 작동 중',false),8000); }
+  }
+}
+
+function addUtt(m){
+  const subs=document.getElementById('subs');
+  const empty=subs.querySelector('.empty'); if(empty) empty.remove();
+  const d=document.createElement('div');
+  d.className='utt'+(m.danger&&m.danger.length?' danger':'');
+  d.innerHTML=`<div class="meta">[${m.time}] 화자 <b>${m.speaker}</b> (${m.lang})</div>
+    <div class="txt">${esc(m.text)}</div>`+
+    (m.translation?`<div class="tr">↳ ${esc(m.translation)}</div>`:'')+
+    (m.danger&&m.danger.length?`<div class="dg">⚠ 위험 감지: ${m.danger.join(', ')}</div>`:'');
+  subs.appendChild(d);
+  document.getElementById('v-main').scrollTop=1e9;
+}
+function addLog(m){
+  document.getElementById('logEmpty').style.display='none';
+  const tb=document.getElementById('logBody');
+  const tr=document.createElement('tr'); if(m.danger&&m.danger.length) tr.className='dgr';
+  tr.innerHTML=`<td class="t">${m.time}</td><td class="s">${m.speaker}</td>
+    <td>${esc(m.text)}${m.translation?`<div class="tr2">${esc(m.translation)}</div>`:''}</td>`;
+  tb.prepend(tr);
+  const n=tb.children.length;
+  document.getElementById('logCount').textContent=`총 ${n}건`;
+}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+document.getElementById('clr').onclick=()=>{
+  document.getElementById('subs').innerHTML='<div class="empty">교신 대기중입니다.</div>';
+};
+
+/* ── PTT: 마우스/터치 홀드 + 스페이스바 ── */
+const ptt=document.getElementById('ptt');
+let down=false;
+function pttDown(){ if(!ready||down) return; down=true; ptt.classList.add('rec');
+  document.getElementById('pttTxt').textContent='● 송신중';
+  send({type:'ptt',state:'down',speaker}); }
+function pttUp(){ if(!down) return; down=false; ptt.classList.remove('rec');
+  document.getElementById('pttTxt').textContent='인식중…';
+  send({type:'ptt',state:'up'}); }
+ptt.addEventListener('pointerdown',e=>{e.preventDefault();pttDown();});
+window.addEventListener('pointerup',pttUp);
+ptt.addEventListener('pointerleave',()=>{if(down)pttUp();});
+let spaceTimer=null;
+window.addEventListener('keydown',e=>{ if(e.code==='Space'&&!e.repeat){e.preventDefault();
+  if(spaceTimer){clearTimeout(spaceTimer);spaceTimer=null;} pttDown();}
+  else if(e.code==='Space') e.preventDefault(); });
+window.addEventListener('keyup',e=>{ if(e.code==='Space'){e.preventDefault();
+  spaceTimer=setTimeout(()=>{spaceTimer=null;pttUp();},40);} });
+
+connect();
+</script>
+</body>
+</html>
