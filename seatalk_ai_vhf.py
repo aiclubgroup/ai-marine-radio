@@ -35,11 +35,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QSpinBox,
+    QAbstractSpinBox,
     QSlider,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
     QSizePolicy,
+    QGraphicsDropShadowEffect,
 )
 
 try:
@@ -60,6 +62,7 @@ BAR_COUNT = 26
 # ---------------------------------------------------------------------------
 class C:
     bg = "#020617"  # slate-950
+    bar = "#020617"  # top/bottom control bar background
     panel = "#0f172a"  # slate-900
     panel_deep = "#0b1120"  # slate-950-ish
     border = "#1e293b"  # slate-800
@@ -76,8 +79,38 @@ class C:
     yellow = "#eab308"
 
 
+# Night (default) and Day palettes. Toggling swaps C's attributes in place, then the
+# UI is rebuilt so every widget re-reads C.* while constructing its stylesheet.
+DARK_THEME = dict(
+    bg="#020617", bar="#020617", panel="#0f172a", panel_deep="#0b1120", border="#1e293b", border2="#334155",
+    text="#ffffff", text_dim="#94a3b8", text_dim2="#64748b", cyan="#22d3ee", cyan_dark="#083344",
+    emerald="#34d399", emerald_dark="#052e2b", red="#ef4444", red_dark="#450a0a", yellow="#eab308",
+)
+DAY_THEME = dict(
+    bg="#f4f6f9", bar="#e2e8f0", panel="#ffffff", panel_deep="#e2e8f0", border="#e2e8f0", border2="#cbd5e1",
+    text="#1e293b", text_dim="#334155", text_dim2="#475569", cyan="#0e7490", cyan_dark="#cffafe",
+    emerald="#047857", emerald_dark="#d1fae5", red="#dc2626", red_dark="#fee2e2", yellow="#a16207",
+)
+
+
+def apply_theme(mode):
+    """mode: 'dark' | 'day' | 'auto'. No ambient light sensor is available, so 'auto' uses the dark palette."""
+    palette = DAY_THEME if mode == "day" else DARK_THEME
+    for key, value in palette.items():
+        setattr(C, key, value)
+
+
 def now_str():
     return datetime.now().strftime("%H:%M:%S")
+
+
+# Demo foreign-vessel phrases per source language, keyed to the "번역 언어 설정" combo box.
+# The Korean translation shown to the operator is the same regardless of source language.
+FOREIGN_DEMO = {
+    "EN": ("Approaching the harbor, requesting clearance.", "EN"),
+    "JA": ("港に接近中です。入港許可を要請します。", "JA"),
+    "ZH": ("正在接近港口,请求入境许可。", "ZH"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +225,7 @@ class TopBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(52)
-        self.setStyleSheet(f"background-color:{C.panel}; border-bottom:1px solid {C.border};")
+        self.setStyleSheet(f"background-color:{C.bar}; border-bottom:1px solid {C.border2};")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 0, 18, 0)
@@ -200,9 +233,11 @@ class TopBar(QWidget):
         # Channel
         ch_box = QHBoxLayout()
         ch_label = QLabel("CH")
-        ch_label.setStyleSheet(f"color:{C.text_dim}; font-weight:bold; font-size:11px;")
+        ch_label.setStyleSheet(f"color:{C.text_dim}; font-weight:bold; font-size:11px; background:transparent; border:none;")
         self.ch_value = QLabel("16")
-        self.ch_value.setStyleSheet(f"color:{C.cyan}; font-weight:bold; font-size:22px;")
+        self.ch_value.setStyleSheet(
+            f"color:{C.cyan}; font-weight:bold; font-size:32px; background:transparent; border:none;"
+        )
         ch_box.addWidget(ch_label)
         ch_box.addWidget(self.ch_value)
         layout.addLayout(ch_box)
@@ -210,22 +245,23 @@ class TopBar(QWidget):
         layout.addSpacing(18)
 
         signal_label = QLabel("● 신호 강함")
-        signal_label.setStyleSheet(f"color:{C.emerald}; font-size:12px; font-weight:600;")
+        signal_label.setStyleSheet(
+            f"color:{C.emerald}; font-size:12px; font-weight:600; background:transparent; border:none;"
+        )
         layout.addWidget(signal_label)
 
         layout.addStretch()
 
-        ai_pill = QLabel("⚡ AI Noise Filter ON")
-        ai_pill.setStyleSheet(
-            f"color:{C.cyan}; background-color:{C.cyan_dark}; border:1px solid {C.border2};"
-            "border-radius:12px; padding:4px 12px; font-size:11px; font-weight:600;"
-        )
-        layout.addWidget(ai_pill)
+        self.ai_status = QLabel()
+        layout.addWidget(self.ai_status)
+        self.set_ai_status(True)
 
         layout.addSpacing(18)
 
         self.clock_label = QLabel("00:00:00")
-        self.clock_label.setStyleSheet(f"color:{C.text}; font-size:18px; font-family:monospace;")
+        self.clock_label.setStyleSheet(
+            f"color:{C.text}; font-size:18px; font-family:monospace; background:transparent; border:none;"
+        )
         layout.addWidget(self.clock_label)
 
         self.timer = QTimer(self)
@@ -239,12 +275,25 @@ class TopBar(QWidget):
     def set_channel(self, ch):
         self.ch_value.setText(str(ch))
 
+    def set_ai_status(self, ok):
+        if ok:
+            self.ai_status.setText("●")
+            self.ai_status.setToolTip("AI 모니터링 정상 작동 중")
+            self.ai_status.setStyleSheet(f"color:{C.emerald}; font-size:9px; background:transparent; border:none;")
+        else:
+            self.ai_status.setText("⚠ AI 기능 중단됨")
+            self.ai_status.setToolTip("AI 기능이 중단되어 기본 무전 기능으로 동작 중입니다")
+            self.ai_status.setStyleSheet(
+                f"color:{C.yellow}; background-color:rgba(234, 179, 8, 0.15); border:1px solid {C.yellow}; "
+                "border-radius:12px; padding:4px 12px; font-size:11px; font-weight:600;"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Chat bubble
 # ---------------------------------------------------------------------------
 class ChatBubble(QWidget):
-    def __init__(self, sender, timestamp, original, translated, language, is_self, parent=None):
+    def __init__(self, sender, timestamp, original, translated, language, is_self, font_size=18, parent=None):
         super().__init__(parent)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -273,10 +322,9 @@ class ChatBubble(QWidget):
         header.addStretch()
         inner.addLayout(header)
 
-        main_text = QLabel(translated)
-        main_text.setWordWrap(True)
-        main_text.setStyleSheet(f"color:{C.text}; font-size:15px; font-weight:500; border:none;")
-        inner.addWidget(main_text)
+        self.main_text = QLabel(translated)
+        self.main_text.setWordWrap(True)
+        inner.addWidget(self.main_text)
 
         sub_box = QHBoxLayout()
         sub_box.setSpacing(6)
@@ -286,11 +334,12 @@ class ChatBubble(QWidget):
             "border-radius:4px; padding:1px 5px; font-size:10px; font-weight:bold;"
         )
         sub_box.addWidget(lang_badge)
-        orig_text = QLabel(original)
-        orig_text.setWordWrap(True)
-        orig_text.setStyleSheet(f"color:{C.text_dim}; font-size:12px; border:none;")
-        sub_box.addWidget(orig_text, 1)
+        self.orig_text = QLabel(original)
+        self.orig_text.setWordWrap(True)
+        sub_box.addWidget(self.orig_text, 1)
         inner.addLayout(sub_box)
+
+        self.set_font_size(font_size)
 
         if is_self:
             outer.addStretch()
@@ -298,6 +347,11 @@ class ChatBubble(QWidget):
         else:
             outer.addWidget(bubble)
             outer.addStretch()
+
+    def set_font_size(self, size):
+        sub_size = max(10, size - 4)
+        self.main_text.setStyleSheet(f"color:{C.text}; font-size:{size}px; font-weight:500; border:none;")
+        self.orig_text.setStyleSheet(f"color:{C.text_dim}; font-size:{sub_size}px; border:none;")
 
 
 class LiveTransmitBubble(QWidget):
@@ -348,15 +402,6 @@ class MainScreen(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        status_bar = QLabel("✓ AI 모니터링 정상 작동 중")
-        status_bar.setAlignment(Qt.AlignCenter)
-        status_bar.setFixedHeight(30)
-        status_bar.setStyleSheet(
-            f"background-color:{C.panel}; color:{C.text_dim}; font-size:11px; "
-            f"border-bottom:1px solid {C.border};"
-        )
-        layout.addWidget(status_bar)
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet(f"QScrollArea {{ background-color:{C.bg}; border:none; }}")
@@ -364,7 +409,7 @@ class MainScreen(QWidget):
         self.content = QWidget()
         self.content.setStyleSheet(f"background-color:{C.bg};")
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(18, 18, 18, 18)
+        self.content_layout.setContentsMargins(20, 24, 20, 20)
         self.content_layout.setSpacing(14)
         self.content_layout.addStretch()
 
@@ -372,6 +417,8 @@ class MainScreen(QWidget):
         layout.addWidget(self.scroll)
 
         self.live_bubble = None
+        self._bubbles = []
+        self._font_size = 18
         self.scroll.verticalScrollBar().rangeChanged.connect(self._scroll_to_bottom)
 
     def _scroll_to_bottom(self, _min=None, _max=None):
@@ -379,10 +426,11 @@ class MainScreen(QWidget):
         bar.setValue(bar.maximum())
 
     def add_message(self, sender, timestamp, original, translated, language, is_self):
-        bubble = ChatBubble(sender, timestamp, original, translated, language, is_self)
+        bubble = ChatBubble(sender, timestamp, original, translated, language, is_self, font_size=self._font_size)
         # insert before the trailing stretch
         idx = self.content_layout.count() - 1
         self.content_layout.insertWidget(idx, bubble)
+        self._bubbles.append(bubble)
         self._scroll_to_bottom()
 
     def clear_messages(self):
@@ -391,6 +439,12 @@ class MainScreen(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
+        self._bubbles.clear()
+
+    def set_font_size(self, size):
+        self._font_size = size
+        for bubble in self._bubbles:
+            bubble.set_font_size(size)
 
     def show_live_bubble(self):
         if self.live_bubble is None:
@@ -416,6 +470,11 @@ class MainScreen(QWidget):
 class SettingsScreen(QWidget):
     channelChanged = Signal(str)
     fontSizeChanged = Signal(int)
+    languageChanged = Signal(str)
+    backRequested = Signal()
+
+    LANG_CODES = ["EN", "JA", "ZH"]
+    PRESET_CHANNELS = ["06", "13", "16", "72"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -423,9 +482,23 @@ class SettingsScreen(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
 
+        title_row = QHBoxLayout()
+        back_btn = QPushButton("←")
+        back_btn.setFixedSize(36, 36)
+        back_btn.setCursor(Qt.PointingHandCursor)
+        back_btn.setStyleSheet(
+            f"QPushButton {{ background-color:{C.panel}; color:{C.text}; border:1px solid {C.border2}; "
+            "border-radius:8px; font-size:18px; font-weight:bold; }"
+            f"QPushButton:hover {{ border-color:{C.cyan}; color:{C.cyan}; }}"
+        )
+        back_btn.clicked.connect(self.backRequested.emit)
+        title_row.addWidget(back_btn)
+        title_row.addSpacing(10)
         title = QLabel("설정 (Settings)")
         title.setStyleSheet(f"color:{C.text}; font-size:20px; font-weight:bold; border:none;")
-        outer.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        outer.addLayout(title_row)
         outer.addSpacing(16)
 
         grid = QGridLayout()
@@ -438,37 +511,40 @@ class SettingsScreen(QWidget):
         self.channel_spin = QSpinBox()
         self.channel_spin.setRange(1, 99)
         self.channel_spin.setValue(16)
-        self.channel_spin.setFixedWidth(100)
+        self.channel_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.channel_spin.setAlignment(Qt.AlignCenter)
+        self.channel_spin.setFixedHeight(90)
         self.channel_spin.setStyleSheet(
-            f"background-color:{C.bg}; color:{C.cyan}; border:1px solid {C.border2}; "
-            "border-radius:8px; font-size:22px; font-weight:bold; padding:4px;"
+            f"QSpinBox {{ background-color:{C.bg}; color:{C.cyan}; border:1px solid {C.border2}; "
+            "border-radius:10px; font-size:60px; font-weight:bold; padding:0px; }"
         )
-        self.channel_spin.valueChanged.connect(lambda v: self.channelChanged.emit(str(v)))
+        self.channel_spin.valueChanged.connect(self._on_channel_value_changed)
         ch_layout.addWidget(self.channel_spin)
 
+        self.preset_buttons = {}
         preset_row = QHBoxLayout()
-        for p in ["06", "13", "16", "72"]:
+        preset_row.setSpacing(10)
+        for p in self.PRESET_CHANNELS:
             btn = QPushButton(f"CH {p}")
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                f"QPushButton {{ background-color:{C.bg}; color:{C.text_dim}; "
-                f"border:1px solid {C.border2}; border-radius:8px; padding:8px; font-weight:bold; }}"
-                f"QPushButton:hover {{ border-color:{C.cyan}; }}"
-            )
+            btn.setMinimumHeight(52)
             btn.clicked.connect(lambda checked=False, val=p: self._set_channel(val))
             preset_row.addWidget(btn)
+            self.preset_buttons[p] = btn
         ch_layout.addLayout(preset_row)
         grid.addWidget(ch_card, 0, 0)
+        self._refresh_preset_styles()
 
         # Language card
         lang_card, lang_layout = self._card("번역 언어 설정")
-        combo = QComboBox()
-        combo.addItems(["한국어 ↔ 영어 (English)", "한국어 ↔ 일본어 (日本語)", "한국어 ↔ 중국어 (中文)"])
-        combo.setStyleSheet(
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(["한국어 ↔ 영어 (English)", "한국어 ↔ 일본어 (日本語)", "한국어 ↔ 중국어 (中文)"])
+        self.lang_combo.setStyleSheet(
             f"background-color:{C.bg}; color:{C.text}; border:1px solid {C.border2}; "
             "border-radius:8px; padding:8px; font-size:13px;"
         )
-        lang_layout.addWidget(combo)
+        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_layout.addWidget(self.lang_combo)
         grid.addWidget(lang_card, 0, 1)
 
         # Font size card
@@ -476,7 +552,7 @@ class SettingsScreen(QWidget):
         font_row = QHBoxLayout()
         minus_btn = QPushButton("A-")
         plus_btn = QPushButton("A+")
-        self.font_value_label = QLabel("16px")
+        self.font_value_label = QLabel("18px")
         self.font_value_label.setAlignment(Qt.AlignCenter)
         self.font_value_label.setStyleSheet(f"color:{C.cyan}; font-size:18px; font-weight:bold; border:none;")
         for b in (minus_btn, plus_btn):
@@ -487,7 +563,7 @@ class SettingsScreen(QWidget):
                 f"border:1px solid {C.border2}; border-radius:8px; font-weight:bold; }}"
                 f"QPushButton:hover {{ border-color:{C.cyan}; }}"
             )
-        self._font_size = 16
+        self._font_size = 18
         minus_btn.clicked.connect(lambda: self._bump_font(-2))
         plus_btn.clicked.connect(lambda: self._bump_font(2))
         font_row.addWidget(minus_btn)
@@ -511,6 +587,11 @@ class SettingsScreen(QWidget):
     def _card(self, title_text):
         card = QFrame()
         card.setStyleSheet(f"background-color:{C.panel}; border:1px solid {C.border}; border-radius:14px;")
+        shadow = QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(15, 23, 42, 40))
+        card.setGraphicsEffect(shadow)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(18, 16, 18, 16)
         title = QLabel(title_text)
@@ -521,10 +602,34 @@ class SettingsScreen(QWidget):
     def _set_channel(self, val):
         self.channel_spin.setValue(int(val))
 
+    def _on_channel_value_changed(self, v):
+        self.channelChanged.emit(str(v))
+        self._refresh_preset_styles()
+
+    def _refresh_preset_styles(self):
+        current = f"{self.channel_spin.value():02d}"
+        for p, btn in self.preset_buttons.items():
+            if p == current:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color:{C.cyan}; color:{C.bg}; "
+                    f"border:2px solid {C.cyan}; border-radius:10px; padding:10px; "
+                    "font-size:15px; font-weight:bold; }"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color:{C.bg}; color:{C.text_dim}; "
+                    f"border:2px solid {C.border2}; border-radius:10px; padding:10px; "
+                    "font-size:15px; font-weight:bold; }"
+                    f"QPushButton:hover {{ border-color:{C.cyan}; color:{C.cyan}; }}"
+                )
+
     def _bump_font(self, delta):
         self._font_size = max(12, min(32, self._font_size + delta))
         self.font_value_label.setText(f"{self._font_size}px")
         self.fontSizeChanged.emit(self._font_size)
+
+    def _on_language_changed(self, index):
+        self.languageChanged.emit(self.LANG_CODES[index])
 
 
 # ---------------------------------------------------------------------------
@@ -580,75 +685,6 @@ class LogScreen(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# System status screen
-# ---------------------------------------------------------------------------
-class SystemScreen(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet(f"background-color:{C.bg};")
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
-
-        title = QLabel("시스템 상태 (System)")
-        title.setStyleSheet(f"color:{C.text}; font-size:20px; font-weight:bold; border:none;")
-        outer.addWidget(title)
-        outer.addSpacing(16)
-
-        grid = QGridLayout()
-        grid.setSpacing(16)
-        outer.addLayout(grid)
-        outer.addStretch()
-
-        cards = [
-            ("배터리 잔량", "84%", "방전까지 약 12시간", "normal"),
-            ("저장공간", "45 GB", "전체 64GB 중 70% 사용", "normal"),
-            ("CPU 사용률", "32%", "Jetson Nano (Quad-core)", "normal"),
-            ("시스템 온도", "58°C", "냉각팬 정상 작동 중", "warning"),
-            ("AI 모델 상태", "V2.1", "STT & 번역 모듈 정상", "normal"),
-            ("노이즈 필터", "강함", "해풍/엔진음 제거 활성화", "normal"),
-        ]
-        for i, (title_text, value, detail, status) in enumerate(cards):
-            card = self._status_card(title_text, value, detail, status)
-            grid.addWidget(card, i // 3, i % 3)
-
-    def _status_card(self, title_text, value, detail, status):
-        warn = status == "warning"
-        accent = C.yellow if warn else C.emerald
-        card = QFrame()
-        card.setStyleSheet(
-            f"QFrame {{ background-color:{C.panel}; border:1px solid {C.border}; "
-            f"border-left:3px solid {accent}; border-radius:14px; }}"
-        )
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-
-        top = QHBoxLayout()
-        badge = QLabel("주의" if warn else "정상")
-        badge_bg = "#78350f" if warn else "#064e3b"
-        badge.setStyleSheet(
-            f"color:{accent}; background-color:{badge_bg}; border:none; border-radius:10px; "
-            "padding:2px 8px; font-size:10px; font-weight:bold;"
-        )
-        top.addStretch()
-        top.addWidget(badge)
-        layout.addLayout(top)
-
-        title_lbl = QLabel(title_text)
-        title_lbl.setStyleSheet(f"color:{C.text_dim}; font-size:11px; border:none;")
-        layout.addWidget(title_lbl)
-
-        value_lbl = QLabel(value)
-        value_lbl.setStyleSheet(f"color:{C.text}; font-size:22px; font-weight:bold; border:none;")
-        layout.addWidget(value_lbl)
-
-        detail_lbl = QLabel(detail)
-        detail_lbl.setStyleSheet(f"color:{C.text_dim2}; font-size:11px; border:none;")
-        layout.addWidget(detail_lbl)
-
-        return card
-
-
-# ---------------------------------------------------------------------------
 # Emergency overlay
 # ---------------------------------------------------------------------------
 class EmergencyOverlay(QWidget):
@@ -657,85 +693,116 @@ class EmergencyOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"background-color:{C.red_dark};")
+        self.setStyleSheet("background-color: rgba(2, 6, 23, 0.72);")
         self.setAutoFillBackground(True)
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignCenter)
-        outer.setSpacing(10)
 
-        icon = QLabel("⚠")
-        icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet(f"color:{C.red}; font-size:48px; border:none;")
-        outer.addWidget(icon)
+        # Single glassmorphism panel: translucent fill + soft border, no nested boxes.
+        panel = QFrame()
+        panel.setFixedWidth(580)
+        panel.setStyleSheet(
+            "QFrame { background-color: rgba(15, 23, 42, 0.75); "
+            "border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 20px; }"
+        )
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(32, 28, 32, 28)
+        panel_layout.setSpacing(10)
+        panel_layout.setAlignment(Qt.AlignHCenter)
+
+        logo = QLabel("⚠")
+        logo.setFixedSize(58, 58)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setStyleSheet(
+            "QLabel { background: qradialgradient(cx:0.5, cy:0.4, radius:0.9, fx:0.5, fy:0.4, "
+            f"stop:0 #fb923c, stop:1 {C.red}); border-radius:29px; color:white; font-size:24px; border:none; }}"
+        )
+        panel_layout.addWidget(logo, 0, Qt.AlignCenter)
 
         title = QLabel("비상 상황 감지")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(f"color:{C.text}; font-size:28px; font-weight:bold; border:none;")
-        outer.addWidget(title)
+        title.setStyleSheet(f"color:{C.red}; font-size:24px; font-weight:bold; border:none;")
+        panel_layout.addWidget(title)
 
         subtitle = QLabel("COLLISION RISK DETECTED")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet(f"color:{C.red}; font-size:15px; font-weight:bold; letter-spacing:2px; border:none;")
-        outer.addWidget(subtitle)
-        outer.addSpacing(10)
+        subtitle.setStyleSheet("color:#f8fafc; font-size:12px; font-weight:bold; letter-spacing:3px; border:none;")
+        panel_layout.addWidget(subtitle)
+        panel_layout.addSpacing(8)
+        panel_layout.addWidget(self._divider())
+        panel_layout.addSpacing(8)
 
-        info_card = QFrame()
-        info_card.setFixedWidth(560)
-        info_card.setStyleSheet(
-            f"background-color:#7f1d1d; border:2px solid {C.red}; border-radius:12px;"
-        )
-        info_layout = QVBoxLayout(info_card)
-        vessel = QLabel("감지된 교신 내용 (선박: UNKNOWN VESSEL)")
-        vessel.setStyleSheet(f"color:#fca5a5; font-size:11px; font-weight:bold; border:none;")
+        vessel = QLabel("감지된 교신 내용  ·  신박: UNKNOWN VESSEL")
+        vessel.setAlignment(Qt.AlignCenter)
+        vessel.setStyleSheet("color:#fca5a5; font-size:11px; font-weight:bold; border:none;")
+        panel_layout.addWidget(vessel)
+
         msg1 = QLabel('"충돌 위험! 즉시 변침하십시오!"')
-        msg1.setStyleSheet(f"color:{C.text}; font-size:16px; font-weight:600; border:none;")
-        msg2 = QLabel('"Collision imminent! Alter course immediately!"')
-        msg2.setStyleSheet(f"color:#fecaca; font-size:12px; border:none;")
-        info_layout.addWidget(vessel)
-        info_layout.addWidget(msg1)
-        info_layout.addWidget(msg2)
-        outer.addWidget(info_card, 0, Qt.AlignCenter)
+        msg1.setAlignment(Qt.AlignCenter)
+        msg1.setWordWrap(True)
+        msg1.setStyleSheet("color:#ffffff; font-size:18px; font-weight:700; border:none;")
+        panel_layout.addWidget(msg1)
 
-        guide_card = QFrame()
-        guide_card.setFixedWidth(560)
-        guide_card.setStyleSheet("background-color:rgba(0,0,0,0.35); border-radius:12px;")
-        guide_layout = QVBoxLayout(guide_card)
+        msg2 = QLabel('"Collision imminent! Alter course immediately!"')
+        msg2.setAlignment(Qt.AlignCenter)
+        msg2.setWordWrap(True)
+        msg2.setStyleSheet("color:#cbd5e1; font-size:12px; border:none;")
+        panel_layout.addWidget(msg2)
+        panel_layout.addSpacing(8)
+        panel_layout.addWidget(self._divider())
+        panel_layout.addSpacing(8)
+
         guide_title = QLabel("대응 가이드")
-        guide_title.setStyleSheet(f"color:{C.text_dim}; font-size:12px; font-weight:bold; border:none;")
-        guide_layout.addWidget(guide_title)
-        for i, text in enumerate(
-            ["주변 선박의 위치와 침로를 즉시 확인하십시오.", "VHF CH 16으로 해당 선박과 교신을 시도하십시오."], 1
-        ):
-            row = QLabel(f"{i}.  {text}")
-            row.setStyleSheet(f"color:{C.text}; font-size:13px; border:none;")
-            guide_layout.addWidget(row)
-        outer.addWidget(guide_card, 0, Qt.AlignCenter)
-        outer.addSpacing(14)
+        guide_title.setAlignment(Qt.AlignCenter)
+        guide_title.setStyleSheet("color:#94a3b8; font-size:11px; font-weight:bold; border:none;")
+        panel_layout.addWidget(guide_title)
+
+        guide_items = [
+            "주변 선박의 위치와 침로를 즉시 확인하십시오.",
+            "VHF CH 16으로 해당 선박과 교신을 시도하십시오.",
+        ]
+        for text in guide_items:
+            row = QLabel(f"•  {text}")
+            row.setAlignment(Qt.AlignCenter)
+            row.setStyleSheet("color:#e2e8f0; font-size:13px; border:none;")
+            panel_layout.addWidget(row)
+
+        panel_layout.addSpacing(14)
 
         btn_row = QHBoxLayout()
         btn_row.setAlignment(Qt.AlignCenter)
-        confirm_btn = QPushButton("확인 / 경고 해제")
+        confirm_btn = QPushButton("⚠  확인 / 경고 해제")
         confirm_btn.setCursor(Qt.PointingHandCursor)
         confirm_btn.setStyleSheet(
-            f"QPushButton {{ background-color:{C.red}; color:white; border:none; "
+            "QPushButton { background-color:#f59e0b; color:#1c1917; border:none; "
             "border-radius:10px; padding:12px 28px; font-size:14px; font-weight:bold; }"
-            "QPushButton:hover { background-color:#dc2626; }"
+            "QPushButton:hover { background-color:#fbbf24; }"
         )
         confirm_btn.clicked.connect(self.dismissed.emit)
 
         logs_btn = QPushButton("교신 기록 보기")
         logs_btn.setCursor(Qt.PointingHandCursor)
         logs_btn.setStyleSheet(
-            f"QPushButton {{ background-color:#1e293b; color:white; border:1px solid {C.border2}; "
-            "border-radius:10px; padding:12px 28px; font-size:14px; font-weight:bold; }"
-            "QPushButton:hover { background-color:#334155; }"
+            "QPushButton { background-color: rgba(255, 255, 255, 0.08); color:white; "
+            "border:1px solid rgba(255, 255, 255, 0.25); border-radius:10px; padding:12px 28px; "
+            "font-size:14px; font-weight:bold; }"
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.16); }"
         )
         logs_btn.clicked.connect(self.viewLogsRequested.emit)
 
         btn_row.addWidget(confirm_btn)
         btn_row.addWidget(logs_btn)
-        outer.addLayout(btn_row)
+        panel_layout.addLayout(btn_row)
+
+        outer.addWidget(panel, 0, Qt.AlignCenter)
+
+    @staticmethod
+    def _divider():
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background-color: rgba(255, 255, 255, 0.12); border:none;")
+        return line
 
 
 # ---------------------------------------------------------------------------
@@ -829,11 +896,12 @@ class BottomNav(QWidget):
     clearRequested = Signal()
     pttStarted = Signal()
     pttEnded = Signal()
+    modeRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(96)
-        self.setStyleSheet(f"background-color:{C.bg}; border-top:1px solid {C.border};")
+        self.setStyleSheet(f"background-color:{C.bar}; border-top:1px solid {C.border2};")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 0, 18, 0)
@@ -841,7 +909,7 @@ class BottomNav(QWidget):
         left = QHBoxLayout()
         left.setSpacing(10)
         self.nav_buttons = {}
-        for key, label in [("settings", "MENU"), ("system", "SYS")]:
+        for key, label in [("settings", "MENU")]:
             btn = self._nav_button(label)
             btn.clicked.connect(lambda checked=False, k=key: self.navRequested.emit(k))
             self.nav_buttons[key] = btn
@@ -857,34 +925,21 @@ class BottomNav(QWidget):
         left.addWidget(logs_btn)
 
         layout.addLayout(left)
-        layout.addStretch()
+        layout.addSpacing(16)
 
-        ptt_box = QVBoxLayout()
-        ptt_box.setAlignment(Qt.AlignCenter)
-        self.ptt_meter = LiveMeterWidget(bar_count=BAR_COUNT, color=C.cyan)
-        self.ptt_meter.setFixedSize(220, 34)
-        self.ptt_meter.hide()
-        ptt_box.addWidget(self.ptt_meter, 0, Qt.AlignCenter)
-
+        self._ptt_active = False
         self.ptt_btn = QPushButton("🎙  PTT")
-        self.ptt_btn.setFixedSize(160, 64)
+        self.ptt_btn.setFixedHeight(60)
+        self.ptt_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.ptt_btn.setCursor(Qt.PointingHandCursor)
         self._ptt_style(pressed=False)
-        self.ptt_btn.pressed.connect(self._on_ptt_down)
-        self.ptt_btn.released.connect(self._on_ptt_up)
-        ptt_box.addWidget(self.ptt_btn)
-
-        self.ptt_hint = QLabel("길게 눌러 송신")
-        self.ptt_hint.setAlignment(Qt.AlignCenter)
-        self.ptt_hint.setStyleSheet(f"color:{C.text_dim2}; font-size:10px; border:none;")
-        ptt_box.addWidget(self.ptt_hint)
-
-        layout.addLayout(ptt_box)
-        layout.addStretch()
+        self.ptt_btn.clicked.connect(self._on_ptt_toggle)
+        layout.addWidget(self.ptt_btn, 1)
 
         right = QHBoxLayout()
-        mode_btn = self._nav_button("MODE")
-        right.addWidget(mode_btn)
+        self.mode_btn = self._nav_button("MODE")
+        self.mode_btn.clicked.connect(self.modeRequested.emit)
+        right.addWidget(self.mode_btn)
         layout.addLayout(right)
 
     def _nav_button(self, label):
@@ -911,20 +966,13 @@ class BottomNav(QWidget):
                 "QPushButton:hover { background-color:#67e8f9; }"
             )
 
-    def _on_ptt_down(self):
-        self._ptt_style(pressed=True)
-        self.ptt_meter.show()
-        self.ptt_hint.setText("송신 중...")
-        self.pttStarted.emit()
-
-    def _on_ptt_up(self):
-        self._ptt_style(pressed=False)
-        self.ptt_meter.hide()
-        self.ptt_hint.setText("길게 눌러 송신")
-        self.pttEnded.emit()
-
-    def update_meter(self, levels):
-        self.ptt_meter.set_levels(levels)
+    def _on_ptt_toggle(self):
+        self._ptt_active = not self._ptt_active
+        self._ptt_style(pressed=self._ptt_active)
+        if self._ptt_active:
+            self.pttStarted.emit()
+        else:
+            self.pttEnded.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -945,18 +993,17 @@ class AppContainer(QWidget):
         self.main_screen = MainScreen()
         self.settings_screen = SettingsScreen()
         self.log_screen = LogScreen()
-        self.system_screen = SystemScreen()
         self.content_stack.addWidget(self.main_screen)  # 0
         self.content_stack.addWidget(self.settings_screen)  # 1
         self.content_stack.addWidget(self.log_screen)  # 2
-        self.content_stack.addWidget(self.system_screen)  # 3
         layout.addWidget(self.content_stack, 1)
 
         self.bottom_nav = BottomNav()
         layout.addWidget(self.bottom_nav)
 
-        self._screen_index = {"main": 0, "settings": 1, "logs": 2, "system": 3}
+        self._screen_index = {"main": 0, "settings": 1, "logs": 2}
         self.bottom_nav.navRequested.connect(self._toggle_screen)
+        self.settings_screen.backRequested.connect(lambda: self.content_stack.setCurrentIndex(0))
 
     def _toggle_screen(self, key):
         target = self._screen_index[key]
@@ -997,22 +1044,31 @@ class MainWindow(QWidget):
         # App state
         self.logs = []
         self.channel = "16"
+        self.foreign_lang = "EN"
         self.mic = MicCapture()
+        self.theme_modes = ["dark", "day", "auto"]
+        self.theme_index = 0
 
         # PTT live meter timer (GUI thread; reads mic levels or drives simulation)
         self.ptt_timer = QTimer(self)
         self.ptt_timer.timeout.connect(self._ptt_tick)
 
-        self.app_container.settings_screen.channelChanged.connect(self._set_channel)
-        self.app_container.bottom_nav.pttStarted.connect(self._start_ptt)
-        self.app_container.bottom_nav.pttEnded.connect(self._end_ptt)
-        self.app_container.bottom_nav.clearRequested.connect(self._clear_logs)
+        self._wire_app_container()
 
         # Background simulated incoming messages
         self.incoming_timer = QTimer(self)
         self.incoming_timer.timeout.connect(self._maybe_incoming_message)
 
         self._emergency_fired = False
+
+    def _wire_app_container(self):
+        self.app_container.settings_screen.channelChanged.connect(self._set_channel)
+        self.app_container.settings_screen.fontSizeChanged.connect(self.app_container.main_screen.set_font_size)
+        self.app_container.settings_screen.languageChanged.connect(self._set_foreign_language)
+        self.app_container.bottom_nav.pttStarted.connect(self._start_ptt)
+        self.app_container.bottom_nav.pttEnded.connect(self._end_ptt)
+        self.app_container.bottom_nav.clearRequested.connect(self._clear_logs)
+        self.app_container.bottom_nav.modeRequested.connect(self._cycle_theme)
 
     # ---- Boot ----
     def _on_boot_complete(self):
@@ -1024,6 +1080,62 @@ class MainWindow(QWidget):
     def _set_channel(self, ch):
         self.channel = ch
         self.app_container.top_bar.set_channel(ch)
+
+    # ---- Language ----
+    def _set_foreign_language(self, code):
+        self.foreign_lang = code
+
+    # ---- Theme (Day/Night/Auto) ----
+    def _cycle_theme(self):
+        self.theme_index = (self.theme_index + 1) % len(self.theme_modes)
+        mode = self.theme_modes[self.theme_index]
+        apply_theme(mode)
+        self._rebuild_ui()
+
+    def _rebuild_ui(self):
+        # Colors are baked into stylesheets at widget-construction time, so the simplest
+        # reliable way to re-theme everything is to recreate the screens against the
+        # freshly-updated C palette, then restore whatever state the user had.
+        channel = self.channel
+        font_size = self.app_container.main_screen._font_size
+        lang_index = self.app_container.settings_screen.lang_combo.currentIndex()
+        current_screen = self.app_container.content_stack.currentIndex()
+        logs_snapshot = list(self.logs)
+
+        # The window's own background is baked in at construction time too - refresh it
+        # here, otherwise a stale dark rectangle can show through around/behind the
+        # freshly-rebuilt (light) screens.
+        self.setStyleSheet(f"background-color:{C.bg};")
+
+        self.root_stack.removeWidget(self.app_container)
+        self.app_container.deleteLater()
+        self.app_container = AppContainer()
+        self.root_stack.insertWidget(1, self.app_container)
+        self.root_stack.setCurrentIndex(1)
+
+        self.overlay.setParent(None)
+        self.overlay.deleteLater()
+        self.overlay = EmergencyOverlay(self)
+        self.overlay.setGeometry(0, 0, FRAME_W, FRAME_H)
+        self.overlay.hide()
+        self.overlay.dismissed.connect(self._hide_emergency)
+        self.overlay.viewLogsRequested.connect(self._view_logs_from_overlay)
+
+        self._wire_app_container()
+
+        self.app_container.settings_screen.channel_spin.setValue(int(channel))
+        self._set_channel(channel)
+        self.app_container.main_screen.set_font_size(font_size)
+        self.app_container.settings_screen._font_size = font_size
+        self.app_container.settings_screen.font_value_label.setText(f"{font_size}px")
+        self.app_container.settings_screen.lang_combo.setCurrentIndex(lang_index)
+        self.app_container.content_stack.setCurrentIndex(current_screen)
+
+        self.logs = []
+        for entry in logs_snapshot:
+            self._add_message(
+                entry["sender"], entry["original"], entry["translated"], entry["language"], entry["is_self"]
+            )
 
     # ---- Messages ----
     def _add_message(self, sender, original, translated, language, is_self):
@@ -1047,21 +1159,23 @@ class MainWindow(QWidget):
         self.app_container.log_screen.clear_rows()
 
     def _maybe_incoming_message(self):
-        if self.app_container.bottom_nav.ptt_btn.isDown():
+        if self.app_container.bottom_nav._ptt_active:
             return
         if random.random() > 0.55:
             sender = "OCEAN STAR" if random.random() > 0.5 else "PORT CONTROL"
+            original, tag = FOREIGN_DEMO.get(self.foreign_lang, FOREIGN_DEMO["EN"])
             self._add_message(
                 sender,
-                "Approaching the harbor, requesting clearance.",
+                original,
                 "항구에 접근 중입니다. 진입 허가를 요청합니다.",
-                "EN",
+                tag,
                 is_self=False,
             )
 
     # ---- PTT ----
     def _start_ptt(self):
         self.mic.start()
+        self.app_container.top_bar.set_ai_status(self.mic.mode == "live")
         self.app_container.main_screen.show_live_bubble()
         self.ptt_timer.start(60)
 
@@ -1069,7 +1183,6 @@ class MainWindow(QWidget):
         if self.mic.mode == "simulated":
             self.mic.tick_simulated()
         levels = self.mic.get_levels()
-        self.app_container.bottom_nav.update_meter(levels)
         self.app_container.main_screen.update_live_levels(levels)
 
     def _end_ptt(self):
@@ -1080,7 +1193,7 @@ class MainWindow(QWidget):
             "MY VESSEL",
             "Copy that, standing by.",
             "수신 완료, 대기 중입니다.",
-            "KO",
+            "EN",
             is_self=True,
         )
 
