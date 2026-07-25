@@ -43,9 +43,10 @@ CH = 1
 BLOCK = 1600
 
 DANGER_KW = [
-    "mayday", "pan-pan", "pan pan", "메이데이", "조난", "구조",
-    "침수", "화재", "충돌", "좌초", "침몰", "익수", "man overboard",
-    "sinking", "on fire", "flooding", "collision", "require assistance", "aground",
+    "mayday", "pan-pan", "pan pan", "메이데이", "팬팬", "조난", "구조",
+    "침수", "화재", "충돌", "좌초", "침몰", "전복", "퇴선", "익수", "man overboard",
+    "sinking", "on fire", "flooding", "collision", "capsize", "abandon ship",
+    "require assistance", "aground",
 ]
 
 
