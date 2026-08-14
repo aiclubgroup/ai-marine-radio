@@ -2,59 +2,60 @@
 # -*- coding: utf-8 -*-
 """
 realtime_stt_gui.py — 해상무전기 실시간 STT 데모 (GUI, macOS/Windows/Linux 공통)
-
 화면의 큰 [PTT] 버튼을 마우스/터치로 "누르고 있는 동안" 녹음 → 떼면 인식해 자막 표시.
 스페이스바 홀드도 지원(키 리핏 보정 포함). 실제 무전 PTT·터치 UI와 동일한 방식이라
 배 시연에 적합하고, macOS에서 별도 권한(sudo)이 필요 없다.
-
 기능:
 - PTT 버튼(마우스/터치 홀드) + 스페이스바 홀드로 녹음
 - 실시간 자막(원문) 표시, 화자 라벨(A/B/C…) 선택
 - 위험 키워드(MAYDAY/침수 등) 감지 시 빨간 경고 배너
 - 옵션: 한↔영 번역 자막(--translate)
 - 원본 음성 WAV + 교신 로그 CSV 자동 저장 → 배 데이터 수집 겸용
-
 설치(맥 예시):
   brew install portaudio
   pip install faster-whisper sounddevice soundfile numpy
   # (번역까지) pip install ctranslate2 transformers sentencepiece
   # tkinter는 파이썬 기본 포함(맥은 python.org 배포판 권장; pyenv면 tcl-tk 필요)
-
 실행:
   python realtime_stt_gui.py --model small
   python realtime_stt_gui.py --model small --translate
   python realtime_stt_gui.py --model base --device cpu     # 느린 노트북
-
 시연 흐름: 앱 실행 → 모델 로딩 대기 → [PTT] 누른 채 말하기 → 떼면 자막.
 화자 바꾸려면 상단 화자 버튼 클릭. 조난 문구("MAYDAY", "침수" 등) 말하면 경고 배너.
 """
-
 import argparse
 import csv
 import queue
 import threading
 import time
 from collections import deque
-
 import numpy as np
-
 SR = 16000
 CH = 1
 BLOCK = 1600
-
 DANGER_KW = [
-    "mayday", "pan-pan", "pan pan", "메이데이", "팬팬", "조난", "구조",
-    "침수", "화재", "충돌", "좌초", "침몰", "전복", "퇴선", "익수", "man overboard",
-    "sinking", "on fire", "flooding", "collision", "capsize", "abandon ship",
-    "require assistance", "aground",
+    "mayday", "pan-pan", "pan pan", "메이데이", "팬팬", "판판", "조난", "구조",
+    "침수", "화재", "충돌", "좌초", "침몰", "익수", "전복", "퇴선", "man overboard",
+    "sinking", "on fire", "flooding", "collision", "require assistance", "aground",
+    "capsize", "abandon ship",
 ]
-
-
+def _is_repetitive(text, min_reps=4):
+    """같은 짧은 구절이 여러 번 반복되면 Whisper 환각으로 보고 True.
+    (예: '안녕하십니까'가 수십 번 이어지는 경우)"""
+    t = "".join(text.split())
+    if len(t) < 6:
+        return False
+    for w in range(2, 9):                 # 2~8글자 구절 단위로 검사
+        unit = t[:w]
+        if unit * min_reps in t:          # 같은 구절이 4번 이상 연속
+            return True
+    # 고유 글자 비율이 극단적으로 낮아도 반복으로 간주
+    if len(set(t)) / len(t) < 0.15:
+        return True
+    return False
 def check_danger(text):
     low = text.lower()
     return [k for k in DANGER_KW if k in low]
-
-
 class STTBackend:
     """Whisper + (옵션)번역. GUI를 막지 않도록 인식은 백그라운드 스레드에서 호출."""
     def __init__(self, model_name, compute_type, device, translate,
@@ -81,7 +82,6 @@ class STTBackend:
         self.translators = {}
         if translate:
             self._load_translators()
-
     def _load_translators(self):
         """방향별 독립 로딩 — 한쪽이 실패해도 다른 쪽은 유지.
         한→영: Opus-MT(경량·검증됨) / 영→한: NLLB-600M
@@ -119,12 +119,21 @@ class STTBackend:
                                              max_length=128)[0],
                                  skip_special_tokens=True)
             self.translators["en"] = en2ko
-            print("[번역기] NLLB-600M 로드 완료 (영→한)")
+            # 일본어·중국어 → 한국어도 같은 NLLB로 추가 (다국어 번역, UI 약속 기능)
+            def make_nllb(src_code, _t=ntok, _m=nmdl, _k=kor_id):
+                def fn(text):
+                    _t.src_lang = src_code
+                    b = _t([text], return_tensors="pt", truncation=True)
+                    return _t.decode(_m.generate(**b, forced_bos_token_id=_k, max_length=128)[0],
+                                     skip_special_tokens=True)
+                return fn
+            self.translators["ja"] = make_nllb("jpn_Jpan")   # 일→한
+            self.translators["zh"] = make_nllb("zho_Hans")   # 중→한
+            print("[번역기] NLLB-600M 로드 완료 (영·일·중→한)")
         except Exception as e:
-            print("[경고] 영→한 번역기 로드 실패:", e)
+            print("[경고] NLLB 번역기 로드 실패:", e)
         if not self.translators:
             self.translate = False
-
     # 주력 언어(우선 언어). --langs 옵션으로 변경 가능, "all"이면 제한 없음.
     # 하드 차단이 아니라 "신뢰도 기반 소프트 제한":
     #   - 감지 언어가 주력 언어면 → 그대로 통과
@@ -134,13 +143,16 @@ class STTBackend:
     def set_lang_policy(self, langs=("ko", "en"), threshold=0.80):
         self.preferred_langs = tuple(langs) if langs else None  # None = 제한 없음
         self.lang_threshold = threshold
-
     def _run_whisper(self, audio, language=None):
         """hotwords(사용자 사전) + 대화 문맥(직전 발화)을 반영해 인식.
         구버전 faster-whisper가 hotwords를 모르면 자동으로 빼고 재시도."""
-        kwargs = dict(beam_size=5, vad_filter=False,
-                      condition_on_previous_text=False,  # 환각 루프(같은 말 반복) 차단 — 젯슨 실측 이슈
-                      no_repeat_ngram_size=3)            # 반복 n-gram 억제
+        kwargs = dict(
+            beam_size=5, vad_filter=False,     # 실시간 마이크 입력이 멈추는 문제로 끔(환각은 아래 옵션들로 잡음)
+            condition_on_previous_text=False,  # 직전 발화에 '꽂혀서' 같은 말 반복하는 환각 차단
+            no_repeat_ngram_size=3,            # 같은 3어절 연속 반복 금지
+            compression_ratio_threshold=2.0,   # 반복 심한 결과는 버림
+            temperature=0.0,
+        )
         if language:
             kwargs["language"] = language
         # initial_prompt = 도메인 프롬프트(항상) + 직전 대화 문맥(있으면)
@@ -157,7 +169,6 @@ class STTBackend:
             except TypeError:
                 pass
         return self.model.transcribe(audio, **kwargs)
-
     def _load_corrector(self, model_id):
         """소형 LLM 문맥 교정기 로드 (--correct 옵션)."""
         try:
@@ -175,7 +186,6 @@ class STTBackend:
             print(f"[AI 보정] {model_id} 로드 완료 ({dev})")
         except Exception as e:
             print("[경고] AI 보정 모델 로드 실패 (보정 없이 계속):", e)
-
     def llm_correct(self, text, lang):
         """문맥 기반 오류 교정 — 환각 방지 3중 가드 포함.
         (연구 근거: LLM 교정은 효과 크지만 과교정 위험 → 판정·검증·폴백 필수)"""
@@ -224,14 +234,12 @@ class STTBackend:
         except Exception as e:
             print("[경고] AI 보정 실패(원문 유지):", e)
             return text
-
     def apply_corrections(self, text):
         """사용자 사전의 교정 쌍(오인식=>정답)을 결정적으로 치환 (다글로 '발음 유사 수정' 방식의 단순판)."""
         for wrong, right in self.corrections.items():
             if wrong in text:
                 text = text.replace(wrong, right)
         return text
-
     def transcribe(self, audio):
         if not hasattr(self, "preferred_langs"):
             self.set_lang_policy()
@@ -249,12 +257,16 @@ class STTBackend:
                 text = " ".join(s.text for s in segs).strip()
                 lang = best
             # else: 확신 높은 진짜 외국어 → 그대로 통과 (다국어 확장 대비)
+        if _is_repetitive(text):                 # 반복 환각이면 한 구절만 남김 (화면 도배 방지)
+            u = "".join(text.split())
+            for w in range(2, 9):
+                if u[:w] * 4 in u:
+                    text = u[:w]; break
         text = self.apply_corrections(text)      # 1차: 사전 기반 결정적 교정
         text = self.llm_correct(text, lang)      # 2차: (옵션) LLM 문맥 교정
-        if text:
-            self.context.append(text)            # 대화 문맥 축적 → 다음 인식에 반영
+        if text and not _is_repetitive(text):
+            self.context.append(text)            # 대화 문맥 축적 → 다음 인식에 반영 (환각 반복은 저장 안 함)
         return text, lang
-
     def translate_text(self, text, lang):
         fn = self.translators.get(lang)
         if not self.translate or fn is None:
@@ -285,31 +297,25 @@ class STTBackend:
         except Exception as e:
             print("[경고] 번역 실패:", e)
             return ""
-
-
 def build_gui(args):
     import tkinter as tk
     from tkinter import scrolledtext
     import sounddevice as sd
     import soundfile as sf
-
     root = tk.Tk()
     root.title("해상무전기 실시간 STT 데모")
     root.geometry("820x620")
     root.configure(bg="#0b1f33")
-
     state = {
         "backend": None, "recording": False, "frames": [], "stream": None,
         "speaker": "A", "space_down": False, "release_job": None, "utt": 0,
     }
-
     # 로그/오디오 저장 준비
     stamp = time.strftime("%Y%m%d_%H%M%S")
     logf = open(f"log_{stamp}.csv", "w", newline="", encoding="utf-8-sig")
     logw = csv.writer(logf)
     logw.writerow(["time", "speaker", "lang", "text", "translation", "danger", "wav"])
     logf.flush()
-
     # ── 상단: 상태 + 화자 선택 ──────────────────────────────────
     top = tk.Frame(root, bg="#0b1f33"); top.pack(fill="x", padx=16, pady=(14, 6))
     status = tk.Label(top, text="모델 로딩 중…", font=("Malgun Gothic", 13, "bold"),
@@ -333,12 +339,10 @@ def build_gui(args):
                       command=lambda s=s: set_speaker(s))
         b._s = s; b.pack(side="left", padx=3); spk_btns.append(b)
     set_speaker("A")
-
     # ── 경고 배너 ───────────────────────────────────────────────
     warn = tk.Label(root, text="", font=("Malgun Gothic", 14, "bold"),
                     fg="white", bg="#0b1f33")
     warn.pack(fill="x", padx=16)
-
     # ── 자막 영역 ───────────────────────────────────────────────
     subs = scrolledtext.ScrolledText(root, font=("Malgun Gothic", 15), wrap="word",
                                      bg="#12263b", fg="#eaf2fb", relief="flat",
@@ -348,7 +352,6 @@ def build_gui(args):
     subs.tag_configure("trans", foreground="#9fd0a0", font=("Malgun Gothic", 13))
     subs.tag_configure("danger", foreground="#ff6b6b", font=("Malgun Gothic", 13, "bold"))
     subs.configure(state="disabled")
-
     def add_line(speaker, text, lang, trans, hits):
         subs.configure(state="normal")
         subs.insert("end", f"[{time.strftime('%H:%M:%S')}] 화자 {speaker} ({lang})\n", "meta")
@@ -359,7 +362,6 @@ def build_gui(args):
             subs.insert("end", f"  ⚠ 위험 감지: {', '.join(hits)}\n", "danger")
         subs.insert("end", "\n")
         subs.see("end"); subs.configure(state="disabled")
-
     # ── PTT 버튼 ────────────────────────────────────────────────
     ptt = tk.Label(root, text="🎙  PTT — 누르고 말하기", font=("Malgun Gothic", 20, "bold"),
                    fg="white", bg="#2f6f3f", height=2, relief="raised", bd=3)
@@ -367,7 +369,6 @@ def build_gui(args):
     hint = tk.Label(root, text="버튼을 누른 채 말하고 떼세요 (스페이스바 홀드도 가능)",
                     font=("Malgun Gothic", 10), fg="#9fb6cc", bg="#0b1f33")
     hint.pack(pady=(0, 12))
-
     # ── 구형 Tk(8.5, macOS 시스템 Tk) 호환 모드 ────────────────────────
     # 구형 aqua Tk는 위젯 배경색을 무시해 "흰 바탕 + 흰 글자"가 되어 버림.
     # 감지되면 시스템 기본(밝은) 테마로 자동 전환해 어떤 맥에서도 보이게 한다.
@@ -402,7 +403,6 @@ def build_gui(args):
                 return _cfg
             _w.configure = _make(_orig_cfg)
         status.configure(fg="#ffd54a")  # → 자동으로 진한 주황으로 변환됨
-
     # ── 녹음 제어 ───────────────────────────────────────────────
     def start_record(_evt=None):
         if state["backend"] is None or state["recording"]:
@@ -413,7 +413,6 @@ def build_gui(args):
         def cb(indata, f, t, s): state["frames"].append(indata[:, 0].copy())
         state["stream"] = sd.InputStream(samplerate=SR, channels=CH, blocksize=BLOCK, callback=cb)
         state["stream"].start()
-
     def stop_record(_evt=None):
         if not state["recording"]:
             return
@@ -435,7 +434,6 @@ def build_gui(args):
         sf.write(wavname, audio, SR)  # 원본 음성 저장(배 데이터 수집 겸용)
         status.configure(text="인식 중…", fg="#ffd54a")
         threading.Thread(target=do_transcribe, args=(audio, speaker, wavname), daemon=True).start()
-
     def do_transcribe(audio, speaker, wavname):
         # (옵션) 노이즈 제거 전처리 — 원본 WAV는 이미 저장됨(데이터 보존), 인식에만 적용
         if getattr(args, "denoise", False):
@@ -457,11 +455,9 @@ def build_gui(args):
                     warn.configure(text=f"⚠ 위험 상황 감지: {', '.join(hits)} — 경고 알림",
                                    bg="#c0392b")
         root.after(0, ui)
-
     # 마우스/터치 홀드
     ptt.bind("<ButtonPress-1>", start_record)
     ptt.bind("<ButtonRelease-1>", stop_record)
-
     # 스페이스바 홀드 (키 리핏 보정: 릴리즈 후 40ms 내 재입력이면 홀드 유지로 간주)
     def space_press(_e=None):
         if state["release_job"] is not None:
@@ -474,7 +470,6 @@ def build_gui(args):
         state["release_job"] = root.after(40, real_release)
     root.bind("<KeyPress-space>", space_press)
     root.bind("<KeyRelease-space>", space_release)
-
     # ── 백엔드 로딩(백그라운드) ─────────────────────────────────
     def load_backend():
         try:
@@ -495,7 +490,6 @@ def build_gui(args):
         except Exception as e:
             root.after(0, lambda: status.configure(text=f"로딩 실패: {e}", fg="#ff6b6b"))
     threading.Thread(target=load_backend, daemon=True).start()
-
     def on_close():
         try: logf.close()
         except Exception: pass
@@ -503,8 +497,6 @@ def build_gui(args):
     root.protocol("WM_DELETE_WINDOW", on_close)
     print(f"[교신 로그] log_{stamp}.csv, 음성 rec_{stamp}_*.wav 저장됩니다.")
     root.mainloop()
-
-
 def load_user_dict(path):
     """사용자 사전 파일 로드.
     형식: 한 줄에 하나 — 고유명사(인명·선박명) 또는 '오인식=>정답' 교정 쌍. #는 주석.
@@ -526,8 +518,6 @@ def load_user_dict(path):
     except FileNotFoundError:
         print(f"[안내] 사용자 사전 없음({path}) — 만들면 고유명사 인식·번역이 좋아집니다")
     return terms, corrections
-
-
 def main():
     ap = argparse.ArgumentParser(description="해상무전기 실시간 STT 데모 (GUI)")
     ap.add_argument("--model", default="small", help="tiny/base/small/medium (기본 small)")
@@ -553,7 +543,5 @@ def main():
                          "성능이 떨어질 수 있음. pip install noisereduce 필요)")
     args = ap.parse_args()
     build_gui(args)
-
-
 if __name__ == "__main__":
     main()

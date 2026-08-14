@@ -64,3 +64,28 @@ ct2-transformers-converter --model facebook/nllb-200-distilled-600M \
 4. 데모 문장 낭독 → ①환각 루프 사라졌는지 ②속도(발화당 처리초) ③화자 라벨 표시 확인
 5. 속도가 여전히 느리면: --model tiny 백업 경로 (small 대비 5배 빠름, CER 손해 감수)
 """
+
+
+---
+
+# 2차 통합 — 2026-08-15 (친구 모듈 병합, 젯슨 배포판)
+
+기준: push된 최신 engine/ + 친구(A역할) 모듈 이식. 한 폴더 = 젯슨 배포 단위.
+
+## 새로 편입 (친구 작성)
+- `diarize.py` — 성문 임베딩 화자 자동분리 (resemblyzer→ECAPA 폴백, 미설치 시 자동 비활성)
+- `io_backend.py` — 오디오·PTT 소스 추상화 (mic/linein/file × ui/gpio/vad) — 무전기·RTL-SDR 연결 대비
+- `log_search.py` — 교신 로그 CSV 검색 CLI
+
+## 병합 내용
+- `marine_danger.py` ← 친구 danger_agent의 **선박명·위치·인원 추출** 이식 (report에 vessel/position/persons 필드 추가)
+- `realtime_stt_gui.py` = 친구판 채택 (**_is_repetitive 환각 반복 필터** + **일/중→한 수신 번역**) + DANGER_KW 복원(팬팬·전복·퇴선)
+- `realtime_stt_web.py` ← `--diarize` 옵션 연결. 화자 라벨 우선순위: 텍스트 자기호출 > 성문 임베딩 > 수동 A/B
+
+## 젯슨 실행 (통합판)
+```bash
+pip install faster-whisper fastapi uvicorn websockets sounddevice soundfile numpy --break-system-packages
+# (선택) 성문 화자분리: pip install resemblyzer
+python3 realtime_stt_web.py --model ~/models/faster-whisper-small-marine            # 웹 UI판
+AI_MODEL_DIR=~/models/faster-whisper-small-marine python3 ai_seatalk_ver2_ai.py    # PySide6 UI판
+```

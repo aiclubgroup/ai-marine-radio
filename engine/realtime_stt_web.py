@@ -42,8 +42,13 @@ import numpy as np
 from realtime_stt_gui import STTBackend, load_user_dict, check_danger, SR, CH, BLOCK
 from marine_speaker import SpeakerTracker
 from marine_danger import DangerAgent
-speaker_tracker = SpeakerTracker()   # 화자분리 (PTT 역할 + 자기호출 라벨)
-danger_agent = DangerAgent()         # 위험분석 2단 (등급·권고)
+speaker_tracker = SpeakerTracker()   # 화자분리 1차: 텍스트("여기는 ○○호") 라벨
+danger_agent = DangerAgent()         # 위험분석 2단 (등급·권고 + 위치·인원 추출)
+# 화자분리 2차: 성문 임베딩 (--diarize 옵션, resemblyzer 필요. 없으면 자동 비활성)
+try:
+    from diarize import SpeakerRegistry
+except Exception:
+    SpeakerRegistry = None
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -99,6 +104,8 @@ def load_backend_thread(args):
             else tuple(l.strip() for l in args.langs.split(",") if l.strip())
         be.set_lang_policy(langs, args.lang_threshold)
         state["backend"] = be
+        if getattr(args, "diarize", False) and SpeakerRegistry is not None:
+            state["diarizer"] = SpeakerRegistry(threshold=args.diarize_threshold)
         state["ready"] = True
         print("[준비 완료] 브라우저에서 PTT를 누르세요.")
         broadcast({"type": "status", "state": "ready", "model": args.model,
@@ -265,11 +272,14 @@ def process_audio(audio, speaker):
     trans = be.translate_text(text, lang) if text else ""
     proc = time.perf_counter() - t0
     hits = check_danger(text) if text else []
-    # 화자분리: 자기호출("여기는 ○○호")이 있으면 선박명 라벨, 없으면 기존 라벨(A/B) 유지.
-    # (실무전 연결 후에는 is_self=PTT 여부로 '본선'/'수신'을 먼저 가른다 — PATCH_NOTES 참조)
+    # 화자분리 (우선순위: 텍스트 자기호출 > 성문 임베딩 > 수동 A/B)
     label = speaker_tracker.assign(text, is_self=False) if text else speaker
     if label == "상대선(미상)":
-        label = speaker
+        dz = state.get("diarizer")
+        if dz is not None and dz.enabled and text:
+            label = dz.identify(audio, hint_text=text, fallback=speaker)
+        else:
+            label = speaker
     # 위험분석 2단: 등급(DISTRESS/URGENCY/SAFETY/WATCH) + 대응 권고
     report = danger_agent.analyze(text, speaker=label) if hits else None
     now = time.strftime("%H:%M:%S")
@@ -383,6 +393,9 @@ def main():
     ap.add_argument("--no-context", action="store_true")
     ap.add_argument("--no-domain-prompt", action="store_true")
     ap.add_argument("--denoise", action="store_true")
+    ap.add_argument("--diarize", action="store_true",
+                    help="성문 임베딩 화자 자동분리 (pip install resemblyzer)")
+    ap.add_argument("--diarize-threshold", type=float, default=0.75)
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--host", default="127.0.0.1", help="다른 기기에서 UI가 붙으면 0.0.0.0")

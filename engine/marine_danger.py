@@ -53,6 +53,26 @@ SITUATIONS = {  # 상황명: (키워드, 기본등급, 대응 권고)
              ["해당 해역 항행 선박 주의", "피항 여부 판단"]),
 }
 
+
+# ── 핵심 정보 추출 (친구 danger_agent.py에서 이식: 위치·인원·선박명) ──
+PLACES = ["가덕도", "오륙도", "태종대", "감천", "영도", "부산항", "광안", "다대포", "송도", "해운대"]
+
+def _find_vessel(text):
+    m = re.search(r'([가-힣0-9]{2,8}호)', text)
+    return m.group(1) if m else None
+
+def _find_position(text):
+    for p in PLACES:
+        if p in text:
+            m = re.search(p + r'\s*[가-힣]{0,3}방?\s*[영공일이삼사오육칠팔구십0-9]+\s*해리', text)
+            return m.group(0) if m else p
+    m = re.search(r'[영공일이삼사오육칠팔구십0-9]+\s*해리', text)
+    return m.group(0) if m else None
+
+def _find_persons(text):
+    m = re.search(r'(선원|인원|승선|탑승)?\s*([영공일이삼사오육칠팔구십0-9]+)\s*명', text)
+    return m.group(0).strip() if m else None
+
 LEVEL_ORDER = ["WATCH", "SAFETY", "URGENCY", "DISTRESS"]
 LEVEL_SCORE = {"DISTRESS": 95, "URGENCY": 70, "SAFETY": 40, "WATCH": 20}
 
@@ -114,8 +134,16 @@ class DangerAgent:
             except Exception:
                 pass                            # LLM 실패해도 규칙 결과로 진행
 
+        # 핵심 정보: 선박명·위치·인원 (있으면 요약에도 반영)
+        vessel = _find_vessel(text)
+        position = _find_position(text)
+        persons = _find_persons(text)
+        extra = " ".join(x for x in [vessel, f"위치 {position}" if position else None, persons] if x)
+        if extra:
+            summary = f"{summary} | {extra}"
         return {"level": level, "score": LEVEL_SCORE[level], "situation": situation,
                 "keywords": hits, "advice": advice[:4], "speaker": speaker,
+                "vessel": vessel, "position": position, "persons": persons,
                 "summary": summary}
 
     def clear(self):
