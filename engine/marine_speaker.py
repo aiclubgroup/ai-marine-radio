@@ -33,6 +33,7 @@ class SpeakerTracker:
     def __init__(self):
         self.last_speaker = None     # 직전 턴 화자
         self.last_addressee = None   # 직전 턴이 부른 상대
+        self.partner = {}            # 교신 짝 {A호: B호, B호: A호} — "A호, 여기는 B호"에서 학습
         self.roster = []             # 등장한 화자 목록 (UI 표시용)
 
     def assign(self, text, is_self=False):
@@ -42,16 +43,29 @@ class SpeakerTracker:
             return "본선"
 
         m = SELF_CALL.search(text)
+        addressee = self._addressee_of(text)
         if m:  # ③ 자기호출 — 가장 확실
             name = _norm_name(m.group(1))
-            self._remember(name, self._addressee_of(text))
+            if addressee and addressee != name:      # "A호, 여기는 B호" → 짝 학습
+                self.partner[name] = addressee
+                self.partner[addressee] = name
+            self._remember(name, addressee)
             return name
 
-        # 자기호출이 없으면: 직전 턴이 부른 상대가 응답 중일 확률이 높다
+        # ③-2 상대 추론: "X, …"로 시작하면 화자는 X의 교신 상대일 확률이 높다
+        if addressee and addressee in self.partner:
+            name = self.partner[addressee]
+            self._remember(name, addressee)
+            return name
+
+        # ③-3 직전 턴이 부른 상대가 응답 중일 확률이 높다
         if self.last_addressee:
             name = self.last_addressee
-            self._remember(name, self._addressee_of(text))
+            self._remember(name, addressee)
             return name
+
+        # 실패해도 addressee는 기억 — 다음 턴 추론 사슬이 끊기지 않게 (실측 버그 수정)
+        self.last_addressee = addressee or self.last_addressee
         return "상대선(미상)"
 
     def _addressee_of(self, text):
@@ -68,15 +82,21 @@ class SpeakerTracker:
 
 
 if __name__ == "__main__":
-    # 세션12 (다화자: 동해호·남성호·새벽호) 시나리오 자가 테스트
+    # 실측 실패 패턴(2026-08-15 맥 데모, 세션1) + 세션12 다화자
     turns = [
+        "부산 브이티에스, 부산 브이티에스, 여기는 여객선 한바다호, 감도 있습니까. 이상.",
+        "한바다호, 여기는 부산 브이티에스, 감도 양호. 말씀하십시오. 이상.",
+        "본선 현재 부산항 남방 삼 해리, 침로 090도, 속력 12 노트, 채널 16 대기 중입니다. 이상.",
+        "한바다호, 침로 090도, 속력 12 노트 확인. 입항 항로 이상 없으며 주의 바랍니다. 이상.",   # ← 실측에서 A로 빠지던 턴
+        "알겠습니다. 감천 방면 주의하겠습니다. 감사합니다. 이상.",                                # ← 그 다음 턴
         "남성호, 여기는 동해호. 감도 있나. 이상.",
-        "어 동해호, 잘 들린다. 지금 어디냐. 이상.",          # 자기호출 없음 → 직전 호출 상대=남성호
+        "어 동해호, 잘 들린다. 지금 어디냐. 이상.",
         "나 지금 가덕도 서방 삼 해리다. 새벽호 지나가니까 항로 비켜라. 이상.",
         "여기는 여객선 새벽호. 항로 유지하겠습니다. 어선들 주의 바랍니다. 이상.",
         "새벽호 확인, 본선 우현으로 피하겠습니다. 이상.",
     ]
-    expected = ["동해호", "남성호", "동해호", "새벽호", None]
+    expected = ["한바다호", "부산VTS", "한바다호", "부산VTS", "한바다호",
+                "동해호", "남성호", "동해호", "새벽호", None]
     t = SpeakerTracker()
     for txt, exp in zip(turns, expected):
         got = t.assign(txt)
