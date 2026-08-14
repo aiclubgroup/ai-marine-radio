@@ -175,6 +175,9 @@ PHRASE_BANK = [
 
 # [AI] 파인튜닝 모델 로드 (지연 로드 — 첫 PTT 때 1회)
 _ASR = {"model": None, "hotwords": None}
+# 디코더 앵커: 저음질 무전에서 영어 번역 표류("ship flooding...")를 막는 한국어 도메인 프롬프트
+AI_DOMAIN_PROMPT = ("한국어 해상 무전 교신. 조난 신호: 메이데이, 팬팬. "
+                    "부산 브이티에스, 여기는 태양호, 감도 있습니까. 침수 발생. 이상.")
 _ASR_LOCK = __import__("threading").Lock()
 AI_MODEL_DIR = os.environ.get(
     "AI_MODEL_DIR",
@@ -218,6 +221,7 @@ def transcribe_audio(mic: "MicCapture") -> str:
         audio = (audio / peak * 0.7).astype("float32")
     model = _load_asr()
     kwargs = dict(language="ko", beam_size=5,
+                  initial_prompt=AI_DOMAIN_PROMPT,   # 한국어·해상 문맥 고정
                   condition_on_previous_text=False,  # 환각 루프(같은 말 반복) 차단
                   no_repeat_ngram_size=3)
     try:
@@ -240,6 +244,7 @@ RADIO_FREQ = os.environ.get("RADIO_FREQ")           # 예: 433.575M / 156.8M
 RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "80")   # 잡음 환각 실측 후 40→80 상향
 RADIO_GAIN = os.environ.get("RADIO_GAIN")               # 예: 20 (자동 게인이 잡음 증폭할 때 고정)
 RADIO_LISTEN = os.environ.get("RADIO_LISTEN")           # 예: plughw:1,0 — 수신음을 스피커로도 출력
+RADIO_MONITOR_GAIN = float(os.environ.get("RADIO_MONITOR_GAIN", "4"))  # 모니터 음량 배율
 #   (서버 경유(pipewire)가 아니라 ALSA 직접 지정 — 젯슨 실측에서 서버 경유가 무음이었음)
 RADIO_SR = 16000
 RADIO_BLOCK = 1600
@@ -264,7 +269,9 @@ class RadioBridge(QObject):
         if shutil.which("rtl_fm") is None:
             print("[무전] rtl_fm 없음 — sudo apt install rtl-sdr")
             return
-        cmd = ["rtl_fm", "-f", RADIO_FREQ, "-M", "nfm", "-s", "200000",
+        # -s 16000: 복조 감도의 핵심 (실측 2026-08-15 — 200000이면 협대역 음성이
+        #   최대 음량의 2.5%로 복조돼 VAD·STT·귀 전부에서 소실. 16000이면 ~30%)
+        cmd = ["rtl_fm", "-f", RADIO_FREQ, "-M", "nfm", "-s", str(RADIO_SR),
                "-r", str(RADIO_SR), "-l", RADIO_SQUELCH]
         if RADIO_GAIN:
             cmd += ["-g", RADIO_GAIN]
@@ -302,7 +309,8 @@ class RadioBridge(QObject):
                 break
             if getattr(self, "_play", None) is not None:
                 try:
-                    self._play.stdin.write(data)     # 스피커로도 흘려보냄 (무전기처럼 들리게)
+                    amp = np.frombuffer(data, dtype=np.int16).astype(np.float32) * RADIO_MONITOR_GAIN
+                    self._play.stdin.write(np.clip(amp, -32767, 32767).astype(np.int16).tobytes())
                 except Exception:
                     self._play = None                # 스피커 끊겨도 수신·전사는 계속
             x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -323,8 +331,14 @@ class RadioBridge(QObject):
 
     def _transcribe(self, audio):
         try:
+            peak = float(np.max(np.abs(audio)))
+            if peak < 1e-4:
+                return                              # 완전 무음
+            if peak < 0.1:                          # 작은 수신음 자동 증폭
+                audio = (audio / peak * 0.7).astype(np.float32)
             model = _load_asr()
             kwargs = dict(language="ko", beam_size=5,
+                          initial_prompt=AI_DOMAIN_PROMPT,   # 영어 표류 방지 앵커
                           condition_on_previous_text=False, no_repeat_ngram_size=3)
             try:
                 if _ASR["hotwords"]:

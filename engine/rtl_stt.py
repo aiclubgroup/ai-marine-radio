@@ -103,6 +103,11 @@ def main():
                               np.arange(len(audio)), audio).astype(np.float32)
         if len(audio) < args.min_utt * SR:
             return
+        peak = float(np.max(np.abs(audio)))
+        if peak < 1e-4:
+            return
+        if peak < 0.1:                    # 작은 수신음 자동 증폭
+            audio = (audio / peak * 0.7).astype(np.float32)
         utt_no += 1
         t0 = time.perf_counter()
         text, lang = be.transcribe(audio)
@@ -145,7 +150,8 @@ def main():
         import subprocess, shutil
         if shutil.which("rtl_fm") is None:
             sys.exit("[오류] rtl_fm 없음 — 설치: sudo apt install rtl-sdr  (설치 후 rtl_test -t로 동글 인식 확인)")
-        cmd = ["rtl_fm", "-f", args.freq, "-M", "nfm", "-s", "200000", "-r", str(args.rate)]
+        # -s를 -r과 같게: 협대역 변조 복조 감도 확보 (200000이면 음성이 2.5%로 소실 — 실측)
+        cmd = ["rtl_fm", "-f", args.freq, "-M", "nfm", "-s", str(args.rate), "-r", str(args.rate)]
         if args.squelch:
             cmd += ["-l", str(args.squelch)]
         if args.gain:
