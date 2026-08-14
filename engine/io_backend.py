@@ -37,6 +37,8 @@ class AudioSource:
     def create(kind="mic", device=None, path=None):
         if kind == "file":
             return FileSource(path)
+        if kind == "stdin":
+            return StdinSource()      # rtl_fm 파이프 (raw S16_LE mono)
         return DeviceSource(device)   # mic / linein 은 device 지정만 다름
 
 
@@ -196,3 +198,37 @@ if __name__ == "__main__":
     import argparse
     ap = add_io_args(argparse.ArgumentParser()); a = ap.parse_args()
     print("현재 설정:", a.audio_source, a.ptt_source, "(하드웨어 없으면 mic/ui로 동작)")
+
+
+class StdinSource(AudioSource):
+    """rtl_fm 파이프 입력 — 하드웨어팀 검증 파이프라인(2026-08-14 젯슨 로그)에 연결.
+
+    rtl_fm은 -r <rate>로 지정한 샘플레이트의 raw S16_LE 모노 PCM을 stdout으로 내보낸다.
+    (스피커 검증 명령: rtl_fm -f 433.575M -M nfm -s 200000 -r 48000 | aplay -D plughw:1,0 ...)
+    STT 연결은 -r 16000으로 뽑아 이 소스로 받는다:
+
+        rtl_fm -f <주파수> -M nfm -s 200000 -r 16000 | python3 rtl_stt.py --model <fw-marine>
+    """
+    def __init__(self):
+        self._run = False
+        self._thread = None
+
+    def start(self, on_frame):
+        import sys, threading
+        self._run = True
+
+        def loop():
+            buf = sys.stdin.buffer
+            bytes_per_block = BLOCK * 2          # int16
+            while self._run:
+                data = buf.read(bytes_per_block)
+                if not data:                      # 파이프 종료
+                    break
+                x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                on_frame(x)
+
+        self._thread = threading.Thread(target=loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._run = False

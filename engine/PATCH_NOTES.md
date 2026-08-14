@@ -89,3 +89,20 @@ pip install faster-whisper fastapi uvicorn websockets sounddevice soundfile nump
 python3 realtime_stt_web.py --model ~/models/faster-whisper-small-marine            # 웹 UI판
 AI_MODEL_DIR=~/models/faster-whisper-small-marine python3 ai_seatalk_ver2_ai.py    # PySide6 UI판
 ```
+
+---
+
+# 3차 — RTL-SDR 무전 → STT 브리지 (2026-08-15 새벽)
+
+하드웨어팀 젯슨 수신 검증(8/14 Notion 로그: Quansheng→RTL-SDR→rtl_fm→스피커)에 STT를 연결.
+
+- `rtl_stt.py` (신규) — rtl_fm 파이프 입력 → VAD 발화 분절 → 파인튜닝 STT → 화자 라벨·위험분석·CSV 로그.
+  A(친구)·B 양쪽 초안을 병합: 엔진 STTBackend(사전·프롬프트) 기반 + 친구 제안 `-l 40` 스퀠치·`--rate` 리샘플 채택.
+  모의 rtl_fm 스트림(무전화 실음성)으로 E2E 검증: 메이데이→DISTRESS 경보, 일반 교신 정상 인식.
+- `io_backend.py` ← StdinSource 추가 (동일 파이프를 웹 UI 엔진에 연결할 때 사용).
+
+젯슨 실행:
+```bash
+rtl_fm -f 433.575M -M nfm -s 200000 -r 16000 -l 40 | python3 rtl_stt.py --model ~/models/fw-marine
+```
+해상 VHF(156-162MHz)는 수신 전용 모니터링만 (전파법).
