@@ -8,8 +8,11 @@ rtl_stt.py — RTL-SDR 무전 수신 → STT 브리지 (하드웨어팀 파이�
 실행은 두 방식 — 어느 쪽이든 결과 동일:
   (1) 한 줄 실행 (권장): rtl_fm을 내부에서 직접 띄움
       python3 rtl_stt.py --freq 433.575M --model ~/models/fw-marine
-  (2) 파이프: rtl_fm -f 433.575M -M nfm -s 200000 -r 16000 -l 40 | python3 rtl_stt.py --model ~/models/fw-marine
-  스퀠치(-l/--squelch 40)는 무신호 잡음을 차단해 VAD 분절을 정확하게 함 (기본 켜짐)
+  (2) 파이프: rtl_fm -f 433.575M -M nfm -s 16000 -r 16000 -l 80 | python3 rtl_stt.py --model ~/models/fw-marine
+  ⚠ -s는 반드시 -r과 같게(16000) — 200000이면 협대역 음성이 2.5% 진폭으로 소실 (밤샘 실측)
+  ⚠ --model 을 빼면 기본 small(파인튜닝 안 된 모델)이 로드됨 — 반드시 fw-marine 경로 지정
+  스퀠치(-l/--squelch 80)는 무신호 잡음을 차단해 VAD 분절을 정확하게 함. 0으로 끄면
+  잡음이 통째로 들어가 "MAYDAY" 환각이 생김 (2026-08-15 새벽 실측)
 
 동글 인식 확인 (최초 1회):
     lsusb            # Realtek RTL2838 보이면 연결됨
@@ -18,7 +21,7 @@ rtl_stt.py — RTL-SDR 무전 수신 → STT 브리지 (하드웨어팀 파이�
 USB 권한 (일반 계정으로 --freq 모드 쓰려면 최초 1회):
     sudo tee /etc/udev/rules.d/20-rtlsdr.rules <<< 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0666"'
     sudo udevadm control --reload-rules && sudo udevadm trigger   # 후 동글 재연결
-    (임시 방편: sudo rtl_fm ... -l 40 | python3 rtl_stt.py --model ... 파이프)
+    (임시 방편: sudo rtl_fm ... -l 80 | python3 rtl_stt.py --model ... 파이프)
 
 동작:
   * stdin으로 raw S16_LE 16kHz 모노 PCM을 받는다 (rtl_fm 출력 포맷 그대로)
@@ -51,7 +54,9 @@ def main():
     ap.add_argument("--model", default="small", help="모델 경로(fw-marine 폴더) 또는 이름")
     ap.add_argument("--freq", default=None,
                     help="수신 주파수 — 주면 rtl_fm을 직접 실행 (예: 433.575M, 156.8M). 없으면 stdin 파이프 모드")
-    ap.add_argument("--squelch", type=int, default=40, help="rtl_fm 스퀠치 레벨 (-l). 0=끔")
+    ap.add_argument("--squelch", type=int, default=80,
+                    help="rtl_fm 스퀠치 레벨 (-l). 0=끔(잡음 홍수 — 환각 원인이라 비권장). "
+                         "-s 16000 스케일 기준 80~150 사이에서 보정 (80=잡음 유입, 200=전부 차단 실측)")
     ap.add_argument("--gain", default=None, help="rtl_fm 튜너 게인 (기본 자동)")
     ap.add_argument("--ui", default=None,
                     help="웹 UI 주입 주소 (예: http://localhost:8765/inject) — 주면 화면에도 표시")
@@ -113,6 +118,20 @@ def main():
         text, lang = be.transcribe(audio)
         dt = time.perf_counter() - t0
         if not text:
+            return
+        # 잡음 환각 필터 (ver2_ai RadioBridge와 동일 기준) — 치직음을 억지로
+        # 글자화한 결과("MAYDAY.com", "바사사삭")가 위험감지까지 가는 것 차단.
+        #  1) no_speech 낮음(<0.3) = 명백한 사람 말 → 신뢰도 무관 통과
+        #  2) no_speech 높음(>0.6) = 무음/잡음 → 폐기
+        #  3) 그 사이면 신뢰도 -1.4 미만일 때만 폐기 (무전 채널은 원래 낮게 나옴)
+        no_sp = getattr(be, "last_no_speech", 0.0)
+        avg_lp = getattr(be, "last_avg_logprob", 0.0)
+        if no_sp > 0.6 or (no_sp >= 0.3 and avg_lp < -1.4):
+            print(f"[잡음 폐기] conf {avg_lp:.2f}, no_speech {no_sp:.2f}: {text[:30]}", flush=True)
+            return
+        t = "".join(text.split())
+        if len(t) >= 6 and (len(set(t)) / len(t) < 0.25 or any(t[:w] * 3 in t for w in (1, 2, 3))):
+            print(f"[반복 환각 폐기] {text[:30]}", flush=True)
             return
         label = tracker.assign(text, is_self=False)
         if label == "상대선(미상)":

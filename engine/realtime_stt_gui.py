@@ -244,6 +244,7 @@ class STTBackend:
         if not hasattr(self, "preferred_langs"):
             self.set_lang_policy()
         segs, info = self._run_whisper(audio)
+        segs = list(segs)
         text = " ".join(s.text for s in segs).strip()
         lang = info.language
         if self.preferred_langs and lang not in self.preferred_langs:
@@ -254,9 +255,14 @@ class STTBackend:
                 best = max(self.preferred_langs, key=lambda l: probs.get(l, 0.0)) \
                     if probs else self.preferred_langs[0]
                 segs, info = self._run_whisper(audio, language=best)
+                segs = list(segs)
                 text = " ".join(s.text for s in segs).strip()
                 lang = best
             # else: 확신 높은 진짜 외국어 → 그대로 통과 (다국어 확장 대비)
+        # 잡음 판정 지표 노출 — rtl_stt 등 호출측이 환각 필터에 사용
+        # (ver2_ai RadioBridge와 같은 집계: 신뢰도=세그먼트 평균, no_speech=최대값)
+        self.last_avg_logprob = (sum(s.avg_logprob for s in segs) / len(segs)) if segs else 0.0
+        self.last_no_speech = max((getattr(s, "no_speech_prob", 0.0) for s in segs), default=1.0)
         if _is_repetitive(text):                 # 반복 환각이면 한 구절만 남김 (화면 도배 방지)
             u = "".join(text.split())
             for w in range(2, 9):
