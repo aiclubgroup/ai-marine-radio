@@ -239,6 +239,8 @@ def transcribe_audio(mic: "MicCapture") -> str:
 RADIO_FREQ = os.environ.get("RADIO_FREQ")           # 예: 433.575M / 156.8M
 RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "80")   # 잡음 환각 실측 후 40→80 상향
 RADIO_GAIN = os.environ.get("RADIO_GAIN")               # 예: 20 (자동 게인이 잡음 증폭할 때 고정)
+RADIO_LISTEN = os.environ.get("RADIO_LISTEN")           # 예: plughw:1,0 — 수신음을 스피커로도 출력
+#   (서버 경유(pipewire)가 아니라 ALSA 직접 지정 — 젯슨 실측에서 서버 경유가 무음이었음)
 RADIO_SR = 16000
 RADIO_BLOCK = 1600
 
@@ -268,6 +270,15 @@ class RadioBridge(QObject):
             cmd += ["-g", RADIO_GAIN]
         print("[무전] 수신 시작:", " ".join(cmd))
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        self._play = None
+        if RADIO_LISTEN:   # 수신음 스피커 모니터 (aplay 직접 경로)
+            try:
+                self._play = subprocess.Popen(
+                    ["aplay", "-q", "-D", RADIO_LISTEN, "-r", str(RADIO_SR), "-f", "S16_LE"],
+                    stdin=subprocess.PIPE)
+                print(f"[무전] 스피커 모니터: {RADIO_LISTEN}")
+            except Exception as e:
+                print("[무전] 스피커 모니터 실패(무시):", e)
         self._run = True
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -275,6 +286,8 @@ class RadioBridge(QObject):
         self._run = False
         if self._proc is not None:
             self._proc.terminate()
+        if getattr(self, "_play", None) is not None:
+            self._play.terminate()
 
     def _loop(self):
         buf = self._proc.stdout
@@ -287,6 +300,11 @@ class RadioBridge(QObject):
                 if rc is not None and rc != 0 and self._run:
                     print(f"[무전] rtl_fm 비정상 종료(코드 {rc}) — USB 권한/동글 확인")
                 break
+            if getattr(self, "_play", None) is not None:
+                try:
+                    self._play.stdin.write(data)     # 스피커로도 흘려보냄 (무전기처럼 들리게)
+                except Exception:
+                    self._play = None                # 스피커 끊겨도 수신·전사는 계속
             x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             level = 20 * np.log10(np.sqrt((x ** 2).mean()) + 1e-9)
             if level > -38.0:
@@ -324,9 +342,14 @@ class RadioBridge(QObject):
             text = " ".join(s.text.strip() for s in segs).strip()
             if not text:
                 return
-            if avg_lp < -0.9 or no_sp > 0.6:
+            # 판정 기준 (실측 보정 2026-08-15: 무전 실발화 conf -1.17이 -0.9 임계에 잘려나감)
+            #  1) no_speech 낮음(<0.3) = 명백한 사람 말 → 신뢰도 무관하게 통과
+            #  2) no_speech 높음(>0.6) = 무음/잡음 → 폐기
+            #  3) 그 사이면 신뢰도 -1.4 미만일 때만 폐기 (무전 채널은 원래 낮게 나옴)
+            if no_sp > 0.6 or (no_sp >= 0.3 and avg_lp < -1.4):
                 print(f"[무전] 잡음 판정 폐기 (conf {avg_lp:.2f}, no_speech {no_sp:.2f}): {text[:30]}")
                 return
+            print(f"[무전] 수신 (conf {avg_lp:.2f}, no_speech {no_sp:.2f})")
             t = "".join(text.split())
             if len(t) >= 6 and (len(set(t)) / len(t) < 0.25 or any(t[:w] * 3 in t for w in (1, 2, 3))):
                 print(f"[무전] 반복 환각 폐기: {text[:30]}")
