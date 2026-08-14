@@ -15,6 +15,11 @@ rtl_stt.py — RTL-SDR 무전 수신 → STT 브리지 (하드웨어팀 파이�
     lsusb            # Realtek RTL2838 보이면 연결됨
     rtl_test -t      # Found 1 device(s) 나오면 정상 (PLL not locked 메시지는 무시)
 
+USB 권한 (일반 계정으로 --freq 모드 쓰려면 최초 1회):
+    sudo tee /etc/udev/rules.d/20-rtlsdr.rules <<< 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0666"'
+    sudo udevadm control --reload-rules && sudo udevadm trigger   # 후 동글 재연결
+    (임시 방편: sudo rtl_fm ... -l 40 | python3 rtl_stt.py --model ... 파이프)
+
 동작:
   * stdin으로 raw S16_LE 16kHz 모노 PCM을 받는다 (rtl_fm 출력 포맷 그대로)
   * PTT 신호가 없으므로 VAD(에너지 기반)로 "한 번의 송신 = 한 발화"를 자동 분리
@@ -48,6 +53,8 @@ def main():
                     help="수신 주파수 — 주면 rtl_fm을 직접 실행 (예: 433.575M, 156.8M). 없으면 stdin 파이프 모드")
     ap.add_argument("--squelch", type=int, default=40, help="rtl_fm 스퀠치 레벨 (-l). 0=끔")
     ap.add_argument("--gain", default=None, help="rtl_fm 튜너 게인 (기본 자동)")
+    ap.add_argument("--ui", default=None,
+                    help="웹 UI 주입 주소 (예: http://localhost:8765/inject) — 주면 화면에도 표시")
     ap.add_argument("--compute-type", default="int8")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--dict", default=None, help="user_dict.txt 경로 (기본: 엔진 폴더)")
@@ -118,6 +125,19 @@ def main():
                        rep["level"] if rep else "", rep["position"] if rep else "",
                        rep["persons"] if rep else ""])
         logf.flush()
+        if args.ui:                      # 웹 UI에도 표시 (실패해도 수신은 계속)
+            try:
+                import json as _json
+                from urllib import request as _rq
+                body = {"speaker": label, "text": text, "danger": hits, "proc_sec": round(dt, 2)}
+                if rep:
+                    body["danger_level"] = rep["level"]
+                    body["danger_advice"] = rep["advice"]
+                    body["danger_summary"] = rep["summary"]
+                _rq.urlopen(_rq.Request(args.ui, data=_json.dumps(body).encode(),
+                                        headers={"Content-Type": "application/json"}), timeout=2)
+            except Exception as e:
+                print(f"[ui 전송 실패] {e}", flush=True)
 
     # 입력 소스: --freq 주면 rtl_fm을 직접 실행, 아니면 stdin 파이프
     proc = None
@@ -131,7 +151,7 @@ def main():
         if args.gain:
             cmd += ["-g", str(args.gain)]
         print(f"[rtl_stt] 수신 시작: {' '.join(cmd)}", flush=True)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)   # stderr는 그대로 노출 (장치 오류 진단용)
         buf = proc.stdout
     else:
         buf = sys.stdin.buffer
@@ -140,6 +160,10 @@ def main():
         while True:
             data = buf.read(bytes_per_block)
             if not data:
+                if proc is not None and proc.poll() is not None:
+                    print(f"[오류] rtl_fm이 즉시 종료됨 (코드 {proc.returncode}) — "
+                          "대부분 USB 권한 문제. sudo rtl_fm ... | 파이프로 실행하거나 "
+                          "udev 규칙 설치 후 동글 재연결 (파일 상단 주석 참조)", flush=True)
                 break
             x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             level_db = 20 * np.log10(np.sqrt((x ** 2).mean()) + 1e-9)
