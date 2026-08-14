@@ -138,7 +138,13 @@ class STTBackend:
     def _run_whisper(self, audio, language=None):
         """hotwords(사용자 사전) + 대화 문맥(직전 발화)을 반영해 인식.
         구버전 faster-whisper가 hotwords를 모르면 자동으로 빼고 재시도."""
-        kwargs = dict(beam_size=5, vad_filter=False)
+        kwargs = dict(
+            beam_size=5, vad_filter=True,
+            condition_on_previous_text=False,
+            no_repeat_ngram_size=3,
+            compression_ratio_threshold=2.0,
+            temperature=0.0,
+        )
         if language:
             kwargs["language"] = language
         # initial_prompt = 도메인 프롬프트(항상) + 직전 대화 문맥(있으면)
