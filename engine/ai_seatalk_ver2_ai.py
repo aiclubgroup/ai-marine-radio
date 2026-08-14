@@ -224,6 +224,100 @@ def transcribe_audio(mic: "MicCapture") -> str:
     return " ".join(s.text.strip() for s in segs).strip()
 
 
+# ─────────────────────────────────────────────────────────────
+# [AI] 무전 수신 (RTL-SDR) — 환경변수 RADIO_FREQ 설정 시 활성화
+#   AI_MODEL_DIR=~/models/fw-marine RADIO_FREQ=433.575M python3 ai_seatalk_ver2_ai.py
+#   rtl_fm을 내부에서 띄워 스퀠치 VAD로 발화를 자르고, PTT와 같은 모델로 전사해
+#   수신 메시지로 화면에 띄운다 (조난어면 비상 오버레이 발동).
+# ─────────────────────────────────────────────────────────────
+RADIO_FREQ = os.environ.get("RADIO_FREQ")           # 예: 433.575M / 156.8M
+RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "40")
+RADIO_SR = 16000
+RADIO_BLOCK = 1600
+
+
+class RadioBridge(QObject):
+    """수신 스레드 → Qt 메인 스레드로 발화 전달."""
+    utterance = Signal(str, str)     # (화자 라벨, 텍스트)
+
+    def __init__(self):
+        super().__init__()
+        self._run = False
+        self._proc = None
+        try:
+            from marine_speaker import SpeakerTracker
+            self._tracker = SpeakerTracker()
+        except Exception:
+            self._tracker = None
+
+    def start(self):
+        import subprocess, shutil, threading
+        if shutil.which("rtl_fm") is None:
+            print("[무전] rtl_fm 없음 — sudo apt install rtl-sdr")
+            return
+        cmd = ["rtl_fm", "-f", RADIO_FREQ, "-M", "nfm", "-s", "200000",
+               "-r", str(RADIO_SR), "-l", RADIO_SQUELCH]
+        print("[무전] 수신 시작:", " ".join(cmd))
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        self._run = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self._run = False
+        if self._proc is not None:
+            self._proc.terminate()
+
+    def _loop(self):
+        buf = self._proc.stdout
+        voiced, sil = [], 0
+        min_sil = int(0.6 * RADIO_SR / RADIO_BLOCK)
+        while self._run:
+            data = buf.read(RADIO_BLOCK * 2)
+            if not data:
+                if self._proc.poll() is not None:
+                    print(f"[무전] rtl_fm 종료(코드 {self._proc.returncode}) — USB 권한/동글 확인")
+                break
+            x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            level = 20 * np.log10(np.sqrt((x ** 2).mean()) + 1e-9)
+            if level > -38.0:
+                voiced.append(x); sil = 0
+            elif voiced:
+                voiced.append(x); sil += 1
+                if sil >= min_sil:
+                    audio = np.concatenate(voiced); voiced, sil = [], 0
+                    if len(audio) >= RADIO_SR // 2:
+                        self._transcribe(audio)
+        # 잔여 버퍼
+        if voiced:
+            audio = np.concatenate(voiced)
+            if len(audio) >= RADIO_SR // 2:
+                self._transcribe(audio)
+
+    def _transcribe(self, audio):
+        try:
+            model = _load_asr()
+            kwargs = dict(language="ko", beam_size=5,
+                          condition_on_previous_text=False, no_repeat_ngram_size=3)
+            try:
+                if _ASR["hotwords"]:
+                    segs, _ = model.transcribe(audio, hotwords=_ASR["hotwords"], **kwargs)
+                else:
+                    segs, _ = model.transcribe(audio, **kwargs)
+            except TypeError:
+                segs, _ = model.transcribe(audio, **kwargs)
+            text = " ".join(s.text.strip() for s in segs).strip()
+            if not text:
+                return
+            label = "무전 수신"
+            if self._tracker is not None:
+                got = self._tracker.assign(text, is_self=False)
+                if got != "상대선(미상)":
+                    label = got
+            self.utterance.emit(label, text)
+        except Exception as e:
+            print("[무전] 전사 오류:", e)
+
+
 def translate_text(text_ko: str, target_lang: str) -> str:
     """[AI 연동 지점 — 번역] 실제 구현: LLM 기반 번역 모델에 (text_ko, target_lang)을
     넘겨 번역 결과를 반환한다. 지금은 문구뱅크에서 일치하는 한국어 원문을 찾아
@@ -1316,6 +1410,11 @@ class MainWindow(QWidget):
         #      실제 STT 연동 확인에 방해됨. 원본 데모 동작이 필요하면 아래 두 줄 복원.
         # self.incoming_timer.start(4500)
         # QTimer.singleShot(18000, self._trigger_emergency)
+        # [AI] RADIO_FREQ 설정 시 실제 무전 수신 시작 (RTL-SDR)
+        if RADIO_FREQ:
+            self._radio = RadioBridge()
+            self._radio.utterance.connect(self._on_radio_utterance)
+            self._radio.start()
 
     # ---- Channel ----
     def _set_channel(self, ch):
@@ -1450,6 +1549,26 @@ class MainWindow(QWidget):
         self.overlay.setGeometry(0, 0, self.width(), self.height())
         self.overlay.show()
         self.overlay.raise_()
+
+    def _on_radio_utterance(self, label, text):
+        """[AI] 무전 수신 발화 → 수신 메시지로 표시 + 위험 감지."""
+        text_ko = text
+        try:
+            from marine_translate import MarineTranslator  # noqa — 수신은 한국어 가정, 번역 생략
+        except Exception:
+            pass
+        self._add_message(label, text_ko, text_ko, "ko", is_self=False)
+        try:
+            from marine_danger import DangerAgent
+            if not hasattr(self, "_danger_agent"):
+                self._danger_agent = DangerAgent()
+            rep = self._danger_agent.analyze(text_ko, speaker=label)
+            if rep and rep["level"] in ("DISTRESS", "URGENCY"):
+                self._trigger_emergency()
+        except Exception:
+            low = text_ko.lower()
+            if any(k in low for k in ("메이데이", "mayday", "팬팬", "침수", "화재", "전복")):
+                self._trigger_emergency()
 
     def _hide_emergency(self):
         self.overlay.hide()
