@@ -40,6 +40,10 @@ from pathlib import Path
 import numpy as np
 
 from realtime_stt_gui import STTBackend, load_user_dict, check_danger, SR, CH, BLOCK
+from marine_speaker import SpeakerTracker
+from marine_danger import DangerAgent
+speaker_tracker = SpeakerTracker()   # 화자분리 (PTT 역할 + 자기호출 라벨)
+danger_agent = DangerAgent()         # 위험분석 2단 (등급·권고)
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -261,14 +265,25 @@ def process_audio(audio, speaker):
     trans = be.translate_text(text, lang) if text else ""
     proc = time.perf_counter() - t0
     hits = check_danger(text) if text else []
+    # 화자분리: 자기호출("여기는 ○○호")이 있으면 선박명 라벨, 없으면 기존 라벨(A/B) 유지.
+    # (실무전 연결 후에는 is_self=PTT 여부로 '본선'/'수신'을 먼저 가른다 — PATCH_NOTES 참조)
+    label = speaker_tracker.assign(text, is_self=False) if text else speaker
+    if label == "상대선(미상)":
+        label = speaker
+    # 위험분석 2단: 등급(DISTRESS/URGENCY/SAFETY/WATCH) + 대응 권고
+    report = danger_agent.analyze(text, speaker=label) if hits else None
     now = time.strftime("%H:%M:%S")
     if text:
         if state["logw"]:
-            state["logw"].writerow([now, speaker, lang, text, trans, ";".join(hits), wavname])
+            state["logw"].writerow([now, label, lang, text, trans, ";".join(hits), wavname])
             state["logf"].flush()
-        msg = {"type": "utterance", "time": now, "speaker": speaker, "lang": lang,
+        msg = {"type": "utterance", "time": now, "speaker": label, "lang": lang,
                "text": text, "translation": trans, "danger": hits,
                "proc_sec": round(proc, 2)}
+        if report:
+            msg["danger_level"] = report["level"]
+            msg["danger_advice"] = report["advice"]
+            msg["danger_summary"] = report["summary"]
         state["history"].append(msg)
         del state["history"][:-200]   # 최근 200건만 유지
         broadcast(msg)
