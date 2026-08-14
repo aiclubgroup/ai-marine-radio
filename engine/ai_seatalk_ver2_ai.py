@@ -355,6 +355,28 @@ class MicCapture:
         self._rec = []          # [AI] PTT 동안의 원시 오디오 (STT 입력)
         self.rec_audio = None   # [AI] stop() 후 완성 버퍼 (float32 16kHz)
 
+    @staticmethod
+    def _pick_input_device():
+        """[AI] 입력 장치 선택: MIC_DEVICE 환경변수 > USB 마이크 자동 탐지 > 기본.
+        (젯슨은 USB/HDMI/APE 등 장치가 여럿이라 기본값이 USB 마이크가 아닐 수 있음)"""
+        import os as _os
+        prefer = _os.environ.get("MIC_DEVICE")
+        if prefer not in (None, "", "auto"):
+            try:
+                return int(prefer)
+            except ValueError:
+                return prefer               # 이름 일부 매칭도 sounddevice가 지원
+        try:
+            devs = sd.query_devices()
+        except Exception:
+            return None
+        for key in ("usb", "uac"):          # USB 마이크 우선
+            for i, d in enumerate(devs):
+                if d.get("max_input_channels", 0) > 0 and key in d["name"].lower():
+                    print(f"[AI] 마이크: {d['name']} (device={i})")
+                    return i
+        return None                          # 시스템 기본
+
     def start(self):
         self.active = True
         self._rec = []          # [AI] 새 송신 시작 — 버퍼 리셋
@@ -362,6 +384,7 @@ class MicCapture:
         if HAS_AUDIO:
             try:
                 self.stream = sd.InputStream(
+                    device=self._pick_input_device(),   # [AI] USB 마이크 자동/지정
                     channels=1,
                     samplerate=16000,   # [AI] Whisper 입력 규격(원본 44100) — pipewire가 리샘플
                     blocksize=1024,
