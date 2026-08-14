@@ -42,6 +42,13 @@ class SpeakerTracker:
             self._remember("본선", self._addressee_of(text))
             return "본선"
 
+        # 자기 확인 패턴: "백로호 맞습니다", "○○호입니다" — 문두 이름이 화자 본인
+        mc = re.match(r"^\s*([가-힣A-Za-z0-9][가-힣A-Za-z0-9 ]{0,12}?(?:호|브이티에스|VTS|도선|해경))[\s,]*(맞습니다|입니다)", text)
+        if mc:
+            name = _norm_name(mc.group(1))
+            self._remember(name, None)
+            return name
+
         m = SELF_CALL.search(text)
         addressee = self._addressee_of(text)
         if m:  # ③ 자기호출 — 가장 확실
