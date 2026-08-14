@@ -42,6 +42,8 @@ import numpy as np
 from realtime_stt_gui import STTBackend, load_user_dict, check_danger, SR, CH, BLOCK
 from marine_speaker import SpeakerTracker
 from marine_danger import DangerAgent
+import marine_msgtype
+import voice_command
 speaker_tracker = SpeakerTracker()   # 화자분리 1차: 텍스트("여기는 ○○호") 라벨
 danger_agent = DangerAgent()         # 위험분석 2단 (등급·권고 + 위치·인원 추출)
 # 화자분리 2차: 성문 임베딩 (--diarize 옵션, resemblyzer 필요. 없으면 자동 비활성)
@@ -269,6 +271,13 @@ def process_audio(audio, speaker):
             print("[경고] 노이즈 제거 실패(원음 사용):", e)
     t0 = time.perf_counter()
     text, lang = be.transcribe(audio)
+    # ── 음성 명령 판별: 교신이 아니라 시스템 조작이면 자막 대신 화면 전환 ──
+    cmd = voice_command.parse(text) if text else None
+    if cmd:
+        print(f"[음성명령] {text} → {cmd['action']}")
+        broadcast({"type": "command", "action": cmd["action"]})
+        broadcast({"type": "status", "state": "ready"})
+        return
     trans = be.translate_text(text, lang) if text else ""
     proc = time.perf_counter() - t0
     hits = check_danger(text) if text else []
@@ -282,6 +291,7 @@ def process_audio(audio, speaker):
             label = speaker
     # 위험분석 2단: 등급(DISTRESS/URGENCY/SAFETY/WATCH) + 대응 권고
     report = danger_agent.analyze(text, speaker=label) if hits else None
+    msgtype = marine_msgtype.classify(text) if text else "사담"   # 교신 유형(SMCP 근거)
     now = time.strftime("%H:%M:%S")
     if text:
         if state["logw"]:
@@ -289,7 +299,8 @@ def process_audio(audio, speaker):
             state["logf"].flush()
         msg = {"type": "utterance", "time": now, "speaker": label, "lang": lang,
                "text": text, "translation": trans, "danger": hits,
-               "proc_sec": round(proc, 2)}
+               "msgtype": msgtype, "proc_sec": round(proc, 2),
+               "roster": [v for v in getattr(speaker_tracker, "roster", []) if v]}
         if report:
             msg["danger_level"] = report["level"]
             msg["danger_advice"] = report["advice"]
@@ -338,6 +349,11 @@ async def ws_endpoint(ws: WebSocket):
                 # UI에서 직전 녹음을 스피커로 재생 요청
                 threading.Thread(target=play_audio,
                                  args=(state.get("last_audio"), SR), daemon=True).start()
+            elif m.get("type") == "shutdown":
+                # UI 확인창에서 [예] → 엔진 실제 종료 (음성 "종료해" 확인 흐름)
+                print("[종료] UI 확인 — 엔진을 종료합니다")
+                import os
+                threading.Timer(0.4, lambda: os._exit(0)).start()
     except WebSocketDisconnect:
         state["clients"].discard(ws)
     except Exception:
