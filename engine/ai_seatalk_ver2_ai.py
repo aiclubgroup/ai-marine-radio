@@ -175,11 +175,20 @@ PHRASE_BANK = [
 
 # [AI] 파인튜닝 모델 로드 (지연 로드 — 첫 PTT 때 1회)
 _ASR = {"model": None, "hotwords": None}
+# 디코더 앵커: 저음질 무전에서 영어 번역 표류("ship flooding...")를 막는 한국어 도메인 프롬프트
+AI_DOMAIN_PROMPT = ("한국어 해상 무전 교신. 조난 신호: 메이데이, 팬팬. "
+                    "부산 브이티에스, 여기는 태양호, 감도 있습니까. 침수 발생. 이상.")
+_ASR_LOCK = __import__("threading").Lock()
 AI_MODEL_DIR = os.environ.get(
     "AI_MODEL_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "faster-whisper-small-marine"))
 
 def _load_asr():
+    with _ASR_LOCK:
+        return _load_asr_locked()
+
+
+def _load_asr_locked():
     if _ASR["model"] is None:
         from faster_whisper import WhisperModel
         path = AI_MODEL_DIR if os.path.isdir(AI_MODEL_DIR) else "small"
@@ -212,6 +221,7 @@ def transcribe_audio(mic: "MicCapture") -> str:
         audio = (audio / peak * 0.7).astype("float32")
     model = _load_asr()
     kwargs = dict(language="ko", beam_size=5,
+                  initial_prompt=AI_DOMAIN_PROMPT,   # 한국어·해상 문맥 고정
                   condition_on_previous_text=False,  # 환각 루프(같은 말 반복) 차단
                   no_repeat_ngram_size=3)
     try:
@@ -222,6 +232,150 @@ def transcribe_audio(mic: "MicCapture") -> str:
     except TypeError:                                # 구버전 faster-whisper: hotwords 미지원
         segs, _ = model.transcribe(audio, **kwargs)
     return " ".join(s.text.strip() for s in segs).strip()
+
+
+# ─────────────────────────────────────────────────────────────
+# [AI] 무전 수신 (RTL-SDR) — 환경변수 RADIO_FREQ 설정 시 활성화
+#   AI_MODEL_DIR=~/models/fw-marine RADIO_FREQ=433.575M python3 ai_seatalk_ver2_ai.py
+#   rtl_fm을 내부에서 띄워 스퀠치 VAD로 발화를 자르고, PTT와 같은 모델로 전사해
+#   수신 메시지로 화면에 띄운다 (조난어면 비상 오버레이 발동).
+# ─────────────────────────────────────────────────────────────
+RADIO_FREQ = os.environ.get("RADIO_FREQ")           # 예: 433.575M / 156.8M
+RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "80")   # 잡음 환각 실측 후 40→80 상향
+RADIO_GAIN = os.environ.get("RADIO_GAIN")               # 예: 20 (자동 게인이 잡음 증폭할 때 고정)
+RADIO_LISTEN = os.environ.get("RADIO_LISTEN")           # 예: plughw:1,0 — 수신음을 스피커로도 출력
+RADIO_MONITOR_GAIN = float(os.environ.get("RADIO_MONITOR_GAIN", "4"))  # 모니터 음량 배율
+#   (서버 경유(pipewire)가 아니라 ALSA 직접 지정 — 젯슨 실측에서 서버 경유가 무음이었음)
+RADIO_SR = 16000
+RADIO_BLOCK = 1600
+
+
+class RadioBridge(QObject):
+    """수신 스레드 → Qt 메인 스레드로 발화 전달."""
+    utterance = Signal(str, str)     # (화자 라벨, 텍스트)
+
+    def __init__(self):
+        super().__init__()
+        self._run = False
+        self._proc = None
+        try:
+            from marine_speaker import SpeakerTracker
+            self._tracker = SpeakerTracker()
+        except Exception:
+            self._tracker = None
+
+    def start(self):
+        import subprocess, shutil, threading
+        if shutil.which("rtl_fm") is None:
+            print("[무전] rtl_fm 없음 — sudo apt install rtl-sdr")
+            return
+        # -s 16000: 복조 감도의 핵심 (실측 2026-08-15 — 200000이면 협대역 음성이
+        #   최대 음량의 2.5%로 복조돼 VAD·STT·귀 전부에서 소실. 16000이면 ~30%)
+        cmd = ["rtl_fm", "-f", RADIO_FREQ, "-M", "nfm", "-s", str(RADIO_SR),
+               "-r", str(RADIO_SR), "-l", RADIO_SQUELCH]
+        if RADIO_GAIN:
+            cmd += ["-g", RADIO_GAIN]
+        print("[무전] 수신 시작:", " ".join(cmd))
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        self._play = None
+        if RADIO_LISTEN:   # 수신음 스피커 모니터 (aplay 직접 경로)
+            try:
+                self._play = subprocess.Popen(
+                    ["aplay", "-q", "-D", RADIO_LISTEN, "-r", str(RADIO_SR), "-f", "S16_LE"],
+                    stdin=subprocess.PIPE)
+                print(f"[무전] 스피커 모니터: {RADIO_LISTEN}")
+            except Exception as e:
+                print("[무전] 스피커 모니터 실패(무시):", e)
+        self._run = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self._run = False
+        if self._proc is not None:
+            self._proc.terminate()
+        if getattr(self, "_play", None) is not None:
+            self._play.terminate()
+
+    def _loop(self):
+        buf = self._proc.stdout
+        voiced, sil = [], 0
+        min_sil = int(0.6 * RADIO_SR / RADIO_BLOCK)
+        while self._run:
+            data = buf.read(RADIO_BLOCK * 2)
+            if not data:
+                rc = self._proc.poll()
+                if rc is not None and rc != 0 and self._run:
+                    print(f"[무전] rtl_fm 비정상 종료(코드 {rc}) — USB 권한/동글 확인")
+                break
+            if getattr(self, "_play", None) is not None:
+                try:
+                    amp = np.frombuffer(data, dtype=np.int16).astype(np.float32) * RADIO_MONITOR_GAIN
+                    self._play.stdin.write(np.clip(amp, -32767, 32767).astype(np.int16).tobytes())
+                except Exception:
+                    self._play = None                # 스피커 끊겨도 수신·전사는 계속
+            x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            level = 20 * np.log10(np.sqrt((x ** 2).mean()) + 1e-9)
+            if level > -38.0:
+                voiced.append(x); sil = 0
+            elif voiced:
+                voiced.append(x); sil += 1
+                if sil >= min_sil:
+                    audio = np.concatenate(voiced); voiced, sil = [], 0
+                    if len(audio) >= RADIO_SR // 2:
+                        self._transcribe(audio)
+        # 잔여 버퍼
+        if voiced:
+            audio = np.concatenate(voiced)
+            if len(audio) >= RADIO_SR // 2:
+                self._transcribe(audio)
+
+    def _transcribe(self, audio):
+        try:
+            peak = float(np.max(np.abs(audio)))
+            if peak < 1e-4:
+                return                              # 완전 무음
+            if peak < 0.1:                          # 작은 수신음 자동 증폭
+                audio = (audio / peak * 0.7).astype(np.float32)
+            model = _load_asr()
+            kwargs = dict(language="ko", beam_size=5,
+                          initial_prompt=AI_DOMAIN_PROMPT,   # 영어 표류 방지 앵커
+                          condition_on_previous_text=False, no_repeat_ngram_size=3)
+            try:
+                if _ASR["hotwords"]:
+                    segs, _ = model.transcribe(audio, hotwords=_ASR["hotwords"], **kwargs)
+                else:
+                    segs, _ = model.transcribe(audio, **kwargs)
+            except TypeError:
+                segs, _ = model.transcribe(audio, **kwargs)
+            segs = list(segs)
+            if not segs:
+                return
+            # [AI] 잡음 환각 필터 — 치직음을 억지로 글자화한 것("바사사삭", "sea sea sea") 차단
+            avg_lp = sum(s.avg_logprob for s in segs) / len(segs)
+            no_sp = max(getattr(s, "no_speech_prob", 0.0) for s in segs)
+            text = " ".join(s.text.strip() for s in segs).strip()
+            if not text:
+                return
+            # 판정 기준 (실측 보정 2026-08-15: 무전 실발화 conf -1.17이 -0.9 임계에 잘려나감)
+            #  1) no_speech 낮음(<0.3) = 명백한 사람 말 → 신뢰도 무관하게 통과
+            #  2) no_speech 높음(>0.6) = 무음/잡음 → 폐기
+            #  3) 그 사이면 신뢰도 -1.4 미만일 때만 폐기 (무전 채널은 원래 낮게 나옴)
+            if no_sp > 0.6 or (no_sp >= 0.3 and avg_lp < -1.4):
+                print(f"[무전] 잡음 판정 폐기 (conf {avg_lp:.2f}, no_speech {no_sp:.2f}): {text[:30]}")
+                return
+            print(f"[무전] 수신 (conf {avg_lp:.2f}, no_speech {no_sp:.2f})")
+            t = "".join(text.split())
+            if len(t) >= 6 and (len(set(t)) / len(t) < 0.25 or any(t[:w] * 3 in t for w in (1, 2, 3))):
+                print(f"[무전] 반복 환각 폐기: {text[:30]}")
+                return
+            label = "무전 수신"
+            if self._tracker is not None:
+                got = self._tracker.assign(text, is_self=False)
+                if got != "상대선(미상)":
+                    label = got
+            self.utterance.emit(label, text)
+        except Exception as e:
+            print("[무전] 전사 오류:", e)
 
 
 def translate_text(text_ko: str, target_lang: str) -> str:
@@ -261,6 +415,28 @@ class MicCapture:
         self._rec = []          # [AI] PTT 동안의 원시 오디오 (STT 입력)
         self.rec_audio = None   # [AI] stop() 후 완성 버퍼 (float32 16kHz)
 
+    @staticmethod
+    def _pick_input_device():
+        """[AI] 입력 장치 선택: MIC_DEVICE 환경변수 > USB 마이크 자동 탐지 > 기본.
+        (젯슨은 USB/HDMI/APE 등 장치가 여럿이라 기본값이 USB 마이크가 아닐 수 있음)"""
+        import os as _os
+        prefer = _os.environ.get("MIC_DEVICE")
+        if prefer not in (None, "", "auto"):
+            try:
+                return int(prefer)
+            except ValueError:
+                return prefer               # 이름 일부 매칭도 sounddevice가 지원
+        try:
+            devs = sd.query_devices()
+        except Exception:
+            return None
+        for key in ("usb", "uac"):          # USB 마이크 우선
+            for i, d in enumerate(devs):
+                if d.get("max_input_channels", 0) > 0 and key in d["name"].lower():
+                    print(f"[AI] 마이크: {d['name']} (device={i})")
+                    return i
+        return None                          # 시스템 기본
+
     def start(self):
         self.active = True
         self._rec = []          # [AI] 새 송신 시작 — 버퍼 리셋
@@ -268,6 +444,7 @@ class MicCapture:
         if HAS_AUDIO:
             try:
                 self.stream = sd.InputStream(
+                    device=self._pick_input_device(),   # [AI] USB 마이크 자동/지정
                     channels=1,
                     samplerate=16000,   # [AI] Whisper 입력 규격(원본 44100) — pipewire가 리샘플
                     blocksize=1024,
@@ -1316,6 +1493,11 @@ class MainWindow(QWidget):
         #      실제 STT 연동 확인에 방해됨. 원본 데모 동작이 필요하면 아래 두 줄 복원.
         # self.incoming_timer.start(4500)
         # QTimer.singleShot(18000, self._trigger_emergency)
+        # [AI] RADIO_FREQ 설정 시 실제 무전 수신 시작 (RTL-SDR)
+        if RADIO_FREQ:
+            self._radio = RadioBridge()
+            self._radio.utterance.connect(self._on_radio_utterance)
+            self._radio.start()
 
     # ---- Channel ----
     def _set_channel(self, ch):
@@ -1451,6 +1633,26 @@ class MainWindow(QWidget):
         self.overlay.show()
         self.overlay.raise_()
 
+    def _on_radio_utterance(self, label, text):
+        """[AI] 무전 수신 발화 → 수신 메시지로 표시 + 위험 감지."""
+        text_ko = text
+        try:
+            from marine_translate import MarineTranslator  # noqa — 수신은 한국어 가정, 번역 생략
+        except Exception:
+            pass
+        self._add_message(label, text_ko, text_ko, "ko", is_self=False)
+        try:
+            from marine_danger import DangerAgent
+            if not hasattr(self, "_danger_agent"):
+                self._danger_agent = DangerAgent()
+            rep = self._danger_agent.analyze(text_ko, speaker=label)
+            if rep and rep["level"] in ("DISTRESS", "URGENCY"):
+                self._trigger_emergency()
+        except Exception:
+            low = text_ko.lower()
+            if any(k in low for k in ("메이데이", "mayday", "팬팬", "침수", "화재", "전복")):
+                self._trigger_emergency()
+
     def _hide_emergency(self):
         self.overlay.hide()
 
@@ -1458,13 +1660,28 @@ class MainWindow(QWidget):
         self.overlay.hide()
         self.app_container.content_stack.setCurrentIndex(2)
 
+    def keyPressEvent(self, event):
+        # [AI] ESC = 종료 (키오스크 모드엔 닫기 버튼이 없음)
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
     def closeEvent(self, event):
         self.mic.stop()
+        if hasattr(self, "_radio"):
+            self._radio.stop()          # [AI] rtl_fm 정리
         super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
+    # [AI] Ctrl+C로 깔끔히 종료: Qt 루프 중에도 파이썬이 시그널을 처리할 기회를 준다
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    _sig_timer = QTimer()
+    _sig_timer.start(200)
+    _sig_timer.timeout.connect(lambda: None)
     app.setFont(QFont("Malgun Gothic" if sys.platform.startswith("win") else "Noto Sans CJK KR", 10))
 
     # Default: kiosk mode (frameless, snapped to the real screen) — this is what the

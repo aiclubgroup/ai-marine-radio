@@ -53,7 +53,7 @@ except Exception:
     SpeakerRegistry = None
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
     from fastapi.responses import HTMLResponse
     import uvicorn
 except ImportError:
@@ -310,6 +310,28 @@ def process_audio(audio, speaker):
         broadcast(msg)
     else:
         broadcast({"type": "status", "state": "ready"})
+
+
+@app.post("/inject")
+async def inject(req: Request):
+    """외부 소스(rtl_stt 무전 수신 등)의 발화를 UI에 표시.
+    body: {"speaker": "...", "text": "...", "danger": [...], "danger_level": "...", ...}"""
+    m = await req.json()
+    msg = {"type": "utterance", "time": time.strftime("%H:%M:%S"),
+           "speaker": m.get("speaker", "무전"), "lang": m.get("lang", "ko"),
+           "text": m.get("text", ""), "translation": m.get("translation", ""),
+           "danger": m.get("danger", []), "proc_sec": m.get("proc_sec", 0)}
+    for k in ("danger_level", "danger_advice", "danger_summary"):
+        if k in m:
+            msg[k] = m[k]
+    state["history"].append(msg)
+    del state["history"][:-200]
+    if state["logw"]:
+        state["logw"].writerow([msg["time"], msg["speaker"], msg["lang"], msg["text"],
+                                msg["translation"], ";".join(msg["danger"]), "rtl"])
+        state["logf"].flush()
+    broadcast(msg)
+    return {"ok": True}
 
 
 @app.get("/")
