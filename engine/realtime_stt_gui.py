@@ -266,6 +266,17 @@ class STTBackend:
         text = self.llm_correct(text, lang)      # 2차: (옵션) LLM 문맥 교정
         if text and not _is_repetitive(text):
             self.context.append(text)            # 대화 문맥 축적 → 다음 인식에 반영 (환각 반복은 저장 안 함)
+        # 언어 라벨 최종 판정: 모델 감지 대신 결과 텍스트의 문자 구성으로 확정.
+        # (파인튜닝 인코더가 언어감지 분포를 틀어 한국어를 en으로 찍는 실측 문제 —
+        #  라벨이 틀리면 번역 방향까지 틀어지므로 텍스트 기준이 가장 확실)
+        if text:
+            import re as _re
+            hang = len(_re.findall(r"[가-힣]", text))
+            latin = len(_re.findall(r"[A-Za-z]", text))
+            if hang >= 5 or (hang >= 3 and hang >= latin):
+                lang = "ko"      # 한글 5자↑면 한국어 문장 (MAYDAY 등 라틴 혼재 허용)
+            elif latin >= 6 and latin > hang * 2:
+                lang = "en"
         return text, lang
     def translate_text(self, text, lang):
         fn = self.translators.get(lang)
