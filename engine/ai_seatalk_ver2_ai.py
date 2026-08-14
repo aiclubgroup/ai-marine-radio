@@ -274,8 +274,9 @@ class RadioBridge(QObject):
         while self._run:
             data = buf.read(RADIO_BLOCK * 2)
             if not data:
-                if self._proc.poll() is not None:
-                    print(f"[무전] rtl_fm 종료(코드 {self._proc.returncode}) — USB 권한/동글 확인")
+                rc = self._proc.poll()
+                if rc is not None and rc != 0 and self._run:
+                    print(f"[무전] rtl_fm 비정상 종료(코드 {rc}) — USB 권한/동글 확인")
                 break
             x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             level = 20 * np.log10(np.sqrt((x ** 2).mean()) + 1e-9)
@@ -1600,13 +1601,28 @@ class MainWindow(QWidget):
         self.overlay.hide()
         self.app_container.content_stack.setCurrentIndex(2)
 
+    def keyPressEvent(self, event):
+        # [AI] ESC = 종료 (키오스크 모드엔 닫기 버튼이 없음)
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
     def closeEvent(self, event):
         self.mic.stop()
+        if hasattr(self, "_radio"):
+            self._radio.stop()          # [AI] rtl_fm 정리
         super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
+    # [AI] Ctrl+C로 깔끔히 종료: Qt 루프 중에도 파이썬이 시그널을 처리할 기회를 준다
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    _sig_timer = QTimer()
+    _sig_timer.start(200)
+    _sig_timer.timeout.connect(lambda: None)
     app.setFont(QFont("Malgun Gothic" if sys.platform.startswith("win") else "Noto Sans CJK KR", 10))
 
     # Default: kiosk mode (frameless, snapped to the real screen) — this is what the
