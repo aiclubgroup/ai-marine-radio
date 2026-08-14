@@ -175,11 +175,17 @@ PHRASE_BANK = [
 
 # [AI] 파인튜닝 모델 로드 (지연 로드 — 첫 PTT 때 1회)
 _ASR = {"model": None, "hotwords": None}
+_ASR_LOCK = __import__("threading").Lock()
 AI_MODEL_DIR = os.environ.get(
     "AI_MODEL_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "faster-whisper-small-marine"))
 
 def _load_asr():
+    with _ASR_LOCK:
+        return _load_asr_locked()
+
+
+def _load_asr_locked():
     if _ASR["model"] is None:
         from faster_whisper import WhisperModel
         path = AI_MODEL_DIR if os.path.isdir(AI_MODEL_DIR) else "small"
@@ -231,7 +237,8 @@ def transcribe_audio(mic: "MicCapture") -> str:
 #   수신 메시지로 화면에 띄운다 (조난어면 비상 오버레이 발동).
 # ─────────────────────────────────────────────────────────────
 RADIO_FREQ = os.environ.get("RADIO_FREQ")           # 예: 433.575M / 156.8M
-RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "40")
+RADIO_SQUELCH = os.environ.get("RADIO_SQUELCH", "80")   # 잡음 환각 실측 후 40→80 상향
+RADIO_GAIN = os.environ.get("RADIO_GAIN")               # 예: 20 (자동 게인이 잡음 증폭할 때 고정)
 RADIO_SR = 16000
 RADIO_BLOCK = 1600
 
@@ -257,6 +264,8 @@ class RadioBridge(QObject):
             return
         cmd = ["rtl_fm", "-f", RADIO_FREQ, "-M", "nfm", "-s", "200000",
                "-r", str(RADIO_SR), "-l", RADIO_SQUELCH]
+        if RADIO_GAIN:
+            cmd += ["-g", RADIO_GAIN]
         print("[무전] 수신 시작:", " ".join(cmd))
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         self._run = True
@@ -306,8 +315,21 @@ class RadioBridge(QObject):
                     segs, _ = model.transcribe(audio, **kwargs)
             except TypeError:
                 segs, _ = model.transcribe(audio, **kwargs)
+            segs = list(segs)
+            if not segs:
+                return
+            # [AI] 잡음 환각 필터 — 치직음을 억지로 글자화한 것("바사사삭", "sea sea sea") 차단
+            avg_lp = sum(s.avg_logprob for s in segs) / len(segs)
+            no_sp = max(getattr(s, "no_speech_prob", 0.0) for s in segs)
             text = " ".join(s.text.strip() for s in segs).strip()
             if not text:
+                return
+            if avg_lp < -0.9 or no_sp > 0.6:
+                print(f"[무전] 잡음 판정 폐기 (conf {avg_lp:.2f}, no_speech {no_sp:.2f}): {text[:30]}")
+                return
+            t = "".join(text.split())
+            if len(t) >= 6 and (len(set(t)) / len(t) < 0.25 or any(t[:w] * 3 in t for w in (1, 2, 3))):
+                print(f"[무전] 반복 환각 폐기: {text[:30]}")
                 return
             label = "무전 수신"
             if self._tracker is not None:
