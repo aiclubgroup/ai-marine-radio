@@ -26,6 +26,24 @@ _COMMANDS = {
 # (수신 선박 목록은 음성 대신 SYS 화면에서 확인 — STT 오인식 리스크 제거)
 # 이 동작들은 "선박명 목록" 같은 인자를 뽑을 수도 있으나 지금은 단순 화면전환만.
 
+def parse_wake(text):
+    """호출어('시톡')로 시작할 때만 명령으로 인식 (오작동 방지).
+    본선 PTT 발화에만 사용하고, 무전 수신 텍스트엔 절대 붙이지 말 것.
+    예: '시톡 로그 보여줘' → view_log / '시톡 종료해' → quit
+    반환: {"action": ...} 또는 None."""
+    if not text:
+        return None
+    import re
+    m = re.match(r"^\s*(시톡|시톡스|시탁|시독|씨톡|seatalk|sea talk)\s*[,.]?\s*(.*)$",
+                 text.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    rest = m.group(2).strip()
+    if not rest:                       # "시톡"만 부른 경우
+        return {"action": "wake"}
+    return parse(rest, max_len=24)     # 호출어 뒤 문장을 명령으로
+
+
 def parse(text, max_len=16):
     """발화 텍스트 → 명령 dict 또는 None.
     - 공백 제거 길이가 max_len 이하일 때만 명령 후보로 봄(긴 교신 오인 방지).

@@ -918,7 +918,22 @@ class SettingsScreen(QWidget):
         vol_layout.addWidget(self.vol_slider)
         grid.addWidget(vol_card, 1, 1)
 
+        # 수신 선박 카드 (교신 자기호출로 자동 등록된 선박 목록)
+        ves_card, ves_layout = self._card("📡 수신 선박")
+        self.vessels_label = QLabel("아직 수신된 선박이 없습니다.")
+        self.vessels_label.setWordWrap(True)
+        self.vessels_label.setStyleSheet("color:#4fc3e8;font-size:16px;font-weight:600;")
+        ves_layout.addWidget(self.vessels_label)
+        grid.addWidget(ves_card, 2, 0, 1, 2)   # 아래 행, 2칸 폭
+
         self.retheme()
+
+    def set_vessels(self, names):
+        """수신 선박 목록 갱신 (MainWindow가 화자 등장 시 호출)."""
+        if names:
+            self.vessels_label.setText("   ".join(names) + f"      · 총 {len(names)}척")
+        else:
+            self.vessels_label.setText("아직 수신된 선박이 없습니다.")
 
     def _card(self, title_text):
         # NOTE: no QGraphicsDropShadowEffect here — on Jetson Nano's Maxwell GPU,
@@ -1544,6 +1559,16 @@ class MainWindow(QWidget):
         )
         self.app_container.main_screen.add_message(sender, ts, original, translated, language, is_self)
         self.app_container.log_screen.add_row(ts, sender, translated)
+        # 수신 선박 로스터 갱신 (자기호출로 식별된 선박명만, 본선/일반호칭 제외)
+        if not hasattr(self, "_roster"):
+            self._roster = []
+        _skip = {"MY VESSEL", "본선", "OCEAN STAR", "PORT CONTROL", "상대선(미상)"}
+        if sender and sender not in _skip and sender not in self._roster:
+            self._roster.append(sender)
+            try:
+                self.app_container.settings_screen.set_vessels(self._roster)
+            except Exception:
+                pass
 
     def _clear_logs(self):
         self.logs.clear()
@@ -1591,6 +1616,16 @@ class MainWindow(QWidget):
         text_ko = transcribe_audio(self.mic)
         if not text_ko:
             return                                   # 무음·너무 짧음 — 말풍선 생략
+        # [AI] 음성 명령: 본선 PTT + 호출어("시톡")일 때만 명령으로 처리.
+        #      무전 수신 경로(_on_radio_utterance)엔 걸지 않아 상대 발화의 '종료' 등 오작동 방지.
+        try:
+            import voice_command
+            _cmd = voice_command.parse_wake(text_ko)
+        except Exception:
+            _cmd = None
+        if _cmd:
+            self._do_voice_command(_cmd["action"])
+            return                                   # 명령이면 자막 안 띄움
         # [AI] 화자 라벨: "여기는 ○○호" 자기호출이 있으면 선박명으로 표시
         sender = "MY VESSEL"
         try:
@@ -1603,10 +1638,16 @@ class MainWindow(QWidget):
         # [AI] 번역: 한국어 -> 설정(Settings)에서 고른 번역 언어 (아직 문구뱅크 스텁)
         text_translated = translate_text(text_ko, self.foreign_lang)
 
+        # [AI] 교신 유형 태그(SMCP 근거): 자막 앞에 [조난/긴급/안전/관제/복창/사담]
+        try:
+            import marine_msgtype
+            _tag = marine_msgtype.classify(text_ko)
+        except Exception:
+            _tag = ""
         self._add_message(
             sender,
             text_translated,
-            text_ko,
+            (f"[{_tag}] {text_ko}" if _tag else text_ko),
             self.foreign_lang,
             is_self=True,
         )
@@ -1624,6 +1665,40 @@ class MainWindow(QWidget):
             if any(k in low for k in ("메이데이", "mayday", "팬팬", "pan-pan", "침수", "화재", "전복")):
                 self._trigger_emergency()
 
+    # ---- Voice command (본선 PTT + 호출어 '시톡' 전용) ----
+    def _do_voice_command(self, action):
+        stk = self.app_container.content_stack
+        if action == "view_log":
+            stk.setCurrentIndex(2)
+        elif action == "view_main":
+            stk.setCurrentIndex(0)
+        elif action == "view_sys":
+            stk.setCurrentIndex(1)
+        elif action == "clear":
+            self.app_container.main_screen.clear_messages()
+        elif action == "quit":
+            from PySide6.QtWidgets import QMessageBox
+            box = QMessageBox(self)
+            box.setWindowTitle("종료 확인")
+            box.setText("⚠  시스템을 종료하시겠습니까?")
+            box.setInformativeText("음성 명령으로 종료가 요청되었습니다.")
+            yes = box.addButton("예, 종료", QMessageBox.YesRole)
+            no = box.addButton("아니오", QMessageBox.NoRole)
+            box.setDefaultButton(no)
+            box.setStyleSheet(
+                "QMessageBox{background:#11161d;}"
+                "QLabel{color:#e6edf3;font-size:17px;font-weight:700;}"
+                "QMessageBox QLabel#qt_msgbox_informativelabel{color:#8b98a5;font-size:13px;font-weight:400;}"
+                "QPushButton{min-width:110px;min-height:34px;border-radius:8px;font-size:15px;"
+                "font-weight:700;padding:6px 18px;margin:4px;}"
+            )
+            yes.setStyleSheet("QPushButton{background:#e05252;color:#fff;border:none;}")
+            no.setStyleSheet("QPushButton{background:#161d26;color:#cfe0f0;border:1px solid #2a6b84;}")
+            box.exec()
+            if box.clickedButton() is yes:
+                self.close()
+        # 'wake'(시톡만 부름)·번역토글 등은 화면 조작 없음
+
     # ---- Emergency ----
     def _trigger_emergency(self):
         if self._emergency_fired:
@@ -1640,7 +1715,13 @@ class MainWindow(QWidget):
             from marine_translate import MarineTranslator  # noqa — 수신은 한국어 가정, 번역 생략
         except Exception:
             pass
-        self._add_message(label, text_ko, text_ko, "ko", is_self=False)
+        try:
+            import marine_msgtype
+            _tag = marine_msgtype.classify(text_ko)
+        except Exception:
+            _tag = ""
+        _disp = (f"[{_tag}] {text_ko}" if _tag else text_ko)
+        self._add_message(label, _disp, _disp, "ko", is_self=False)
         try:
             from marine_danger import DangerAgent
             if not hasattr(self, "_danger_agent"):
