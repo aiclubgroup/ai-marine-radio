@@ -25,7 +25,11 @@ ADDRESSEE = re.compile(
     r"^\s*([가-힣A-Za-z0-9][가-힣A-Za-z0-9 ]{0,12}?(?:호|브이티에스|VTS|도선|해경))[\s,]")
 
 def _norm_name(n):
-    return n.replace("브이티에스", "VTS").replace(" ", "")
+    n = n.replace("브이티에스", "VTS").strip()
+    # 선종 접두 제거: "화물선 대양호"→"대양호". STT 오인식(하물선 등)도 커버 —
+    # 선박명은 '호'로 끝나므로, 앞에 붙은 '…선' 토큰(1~3자+선)은 선종으로 보고 제거.
+    n = re.sub(r'^[가-힣]{1,3}선\s+(?=\S)', '', n)   # '제칠 해성호'는 제칠이 선으로 안 끝나 보존
+    return n.replace(" ", "")
 
 class SpeakerTracker:
     """턴 단위 화자 라벨러. STT 텍스트만으로 동작 (임베딩 불필요)."""

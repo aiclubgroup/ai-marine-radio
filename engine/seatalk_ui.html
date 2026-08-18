@@ -128,7 +128,11 @@
       <div class="card"><div class="k">이번 세션 발화</div><div class="v" id="sysUtt">0</div><div class="d">교신 로그 저장 중</div></div>
       <div class="card"><div class="k">평균 처리 시간</div><div class="v" id="sysRtf">-</div><div class="d">발화당 인식 소요(초)</div></div>
     </div>
-    <p style="margin-top:14px">배터리·저장공간·온도 카드는 젯슨 연동 시 tegrastats로 채워질 예정.</p>
+    <h2 style="margin-top:20px;font-size:17px">📡 수신 선박 <span id="sysVesselN" style="color:#8b98a5;font-weight:400;font-size:14px">0척</span></h2>
+    <div id="sysVessels" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+      <span style="color:#5b6672;font-size:14px">아직 수신된 선박이 없습니다.</span>
+    </div>
+    <p style="margin-top:16px;color:#5b6672;font-size:12.5px">교신에서 자기호출("여기는 ○○호")로 식별된 선박이 자동 등록됩니다.</p>
   </div>
 
   <div class="view ph" id="v-menu">
@@ -155,12 +159,13 @@ setInterval(()=>{const d=new Date();
 
 /* ── 뷰 전환 ── */
 const views={main:'v-main',log:'v-log',sys:'v-sys',menu:'v-menu'};
-document.querySelectorAll('.db[data-v]').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
-  document.getElementById(views[b.dataset.v]).classList.add('on');
-  document.querySelectorAll('.db[data-v]').forEach(x=>x.classList.remove('on'));
-  if(b.dataset.v!=='main') b.classList.add('on');
-});
+function showView(v){
+  if(!views[v]) return;
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
+  document.getElementById(views[v]).classList.add('on');
+  document.querySelectorAll('.db[data-v]').forEach(x=>x.classList.toggle('on',x.dataset.v===v&&v!=='main'));
+}
+document.querySelectorAll('.db[data-v]').forEach(b=>b.onclick=()=>showView(b.dataset.v));
 
 /* ── 화자 선택 ── */
 let speaker='A';
@@ -195,15 +200,56 @@ function handle(m){
     } else if(m.state==='processing'){ setReady(false,'인식중…'); }
     else if(m.state==='loading'){ setReady(false); setStrip(m.detail||'엔진 로딩 중…',false); }
   }
+  if(m.type==='command'){ setReady(true); doCommand(m.action); }
   if(m.type==='utterance'){
     setReady(true); uttCount++;
     document.getElementById('sysUtt').textContent=uttCount;
     if(m.proc_sec){ procTimes.push(m.proc_sec);
       document.getElementById('sysRtf').textContent=(procTimes.reduce((a,b)=>a+b,0)/procTimes.length).toFixed(1)+'s'; }
     addUtt(m); addLog(m);
+    if(m.roster) renderVessels(m.roster);
     if(m.danger&&m.danger.length){ setStrip('⚠ 위험 상황 감지: '+m.danger.join(', ')+' — 경고 알림',true);
       setTimeout(()=>setStrip('AI 위험감지 정상 작동 중',false),8000); }
   }
+}
+
+/* 수신 선박 목록 렌더 (SYS 화면) */
+function renderVessels(list){
+  const box=document.getElementById('sysVessels');
+  document.getElementById('sysVesselN').textContent=list.length+'척';
+  if(!list.length){ box.innerHTML='<span style="color:#5b6672;font-size:14px">아직 수신된 선박이 없습니다.</span>'; return; }
+  box.innerHTML=list.map(v=>`<span style="padding:6px 13px;border:1px solid #2a6b84;border-radius:999px;background:#0d2530aa;color:#4fc3e8;font-size:14px;font-weight:600">${esc(v)}</span>`).join('');
+}
+
+/* ── 음성 명령 처리 (자막 대신 화면 조작) ── */
+function doCommand(action){
+  setStrip('🎙 음성 명령: '+action,false);
+  setTimeout(()=>setStrip('AI 위험감지 정상 작동 중',false),2500);
+  if(action==='view_log') showView('log');
+  else if(action==='view_main') showView('main');
+  else if(action==='view_sys') showView('sys');
+  else if(action==='clear'){ document.getElementById('subs').innerHTML='<div class="empty">교신 대기중입니다.</div>'; }
+  else if(action==='quit') showQuitConfirm();
+}
+
+/* ── 종료 확인 오버레이 ("종료하시겠습니까? 예/아니오") ── */
+function showQuitConfirm(){
+  if(document.getElementById('quitOv')) return;
+  const ov=document.createElement('div'); ov.id='quitOv';
+  ov.style.cssText='position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:9999';
+  ov.innerHTML=`<div style="background:#11161d;border:1px solid #2a6b84;border-radius:14px;padding:28px 34px;text-align:center;box-shadow:0 0 30px #000">
+    <div style="font-size:20px;font-weight:800;color:#e6edf3;margin-bottom:6px">⚠ 시스템을 종료하시겠습니까?</div>
+    <div style="font-size:13px;color:#8b98a5;margin-bottom:20px">음성 명령으로 종료 요청됨</div>
+    <div style="display:flex;gap:12px;justify-content:center">
+      <button id="qYes" style="padding:11px 30px;border:none;border-radius:9px;background:#e05252;color:#fff;font-size:16px;font-weight:800;cursor:pointer">예, 종료</button>
+      <button id="qNo" style="padding:11px 30px;border:1px solid #2a6b84;border-radius:9px;background:#161d26;color:#cfe0f0;font-size:16px;font-weight:700;cursor:pointer">아니오</button>
+    </div></div>`;
+  document.body.appendChild(ov);
+  const close=()=>{const e=document.getElementById('quitOv');if(e)e.remove();};
+  document.getElementById('qYes').onclick=()=>{ send({type:'shutdown'}); close();
+    setStrip('시스템 종료 중…',false); };
+  document.getElementById('qNo').onclick=close;
+  setTimeout(close,8000);   // 8초 무응답 시 자동 취소
 }
 
 function addUtt(m){
@@ -211,7 +257,7 @@ function addUtt(m){
   const empty=subs.querySelector('.empty'); if(empty) empty.remove();
   const d=document.createElement('div');
   d.className='utt'+(m.danger&&m.danger.length?' danger':'');
-  d.innerHTML=`<div class="meta">[${m.time}] 화자 <b>${m.speaker}</b> (${m.lang})</div>
+  d.innerHTML=`<div class="meta">${tag(m.msgtype)}[${m.time}] 화자 <b>${m.speaker}</b> (${m.lang})</div>
     <div class="txt">${esc(m.text)}</div>`+
     (m.translation?`<div class="tr">↳ ${esc(m.translation)}</div>`:'')+
     (m.danger&&m.danger.length?`<div class="dg">⚠ 위험 감지: ${m.danger.join(', ')}</div>`:'');
@@ -229,6 +275,12 @@ function addLog(m){
   document.getElementById('logCount').textContent=`총 ${n}건`;
 }
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+/* 교신 유형 태그 (SMCP 근거: 조난/긴급/안전/관제/복창/사담) */
+function tag(t){
+  if(!t) return '';
+  const c={'조난':'#ef4444','긴급':'#f59e0b','안전':'#4fc3e8','관제':'#22c55e','복창':'#8b98a5','사담':'#5b6672'}[t]||'#5b6672';
+  return `<span style="display:inline-block;padding:1px 7px;margin-right:6px;border-radius:4px;font-size:11px;font-weight:700;color:#04222c;background:${c}">${t}</span>`;
+}
 
 document.getElementById('clr').onclick=()=>{
   document.getElementById('subs').innerHTML='<div class="empty">교신 대기중입니다.</div>';
